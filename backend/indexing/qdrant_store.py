@@ -1,0 +1,2 @@
+class QdrantStore:
+    pass

@@ -1,0 +1,2 @@
+class PullRequestParser:
+    pass

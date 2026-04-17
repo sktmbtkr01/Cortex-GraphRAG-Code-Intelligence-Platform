@@ -1,0 +1,2 @@
+class GitGraphBuilder:
+    pass
