@@ -2,20 +2,17 @@ services:
   - type: web
     name: cortex-api
     env: docker
-    dockerfilePath: ./Dockerfile
-    dockerContext: .
+    rootDir: backend
     plan: free
     healthCheckPath: /health
-    autoDeploy: true
     envVars:
       - key: ENVIRONMENT
         value: production
-      - key: EMBEDDING_BACKEND
-        value: jina
-      - key: EMBEDDING_MODEL
-        value: jina-embeddings-v3
-      - key: EMBEDDING_DIMENSIONS
-        value: "1024"
+      - key: BACKEND_URL
+        value: "https://cortex-api.onrender.com"
+      - key: FRONTEND_URL
+        value: "https://cortex-app.vercel.app"
+      # The following must be set securely in the Render Dashboard
       - key: GITHUB_PAT
         sync: false
       - key: GITHUB_WEBHOOK_SECRET
@@ -24,19 +21,13 @@ services:
         sync: false
       - key: QDRANT_API_KEY
         sync: false
-      - key: QDRANT_COLLECTION
-        value: cortex_kb
       - key: NEO4J_URI
         sync: false
       - key: NEO4J_USERNAME
-        value: neo4j
+        sync: false
       - key: NEO4J_PASSWORD
         sync: false
       - key: GROQ_API_KEY
         sync: false
       - key: GEMINI_API_KEY
-        sync: false
-      - key: JINA_API_KEY
-        sync: false
-      - key: CORS_ORIGINS
         sync: false

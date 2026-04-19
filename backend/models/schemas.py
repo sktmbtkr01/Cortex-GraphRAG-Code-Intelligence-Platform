@@ -1,7 +1,60 @@
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field
+
+
+# ---------------------------------------------------------------------------
+# Internal pipeline data classes (not API-facing)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Chunk:
+    """A single chunk produced by a chunker, ready for embedding + Qdrant upsert.
+
+    Content-aware chunking strategy:
+      - Code  → AST chunker (function/class-level, tree-sitter)
+      - Docs  → Section chunker (split at markdown headers)
+      - Issues/PRs → Whole-document (one chunk per item, they're short)
+      - Configs → Whole-document (one chunk per file)
+    """
+
+    id: str
+    text: str
+    repo: str
+    file_path: str
+    language: str
+    source_type: str  # "code" | "docs" | "issue" | "pr" | "config"
+    chunk_type: str  # "function" | "class" | "method" | "module_header" | "section" | "whole_doc"
+
+    # Code-specific (None for non-code)
+    function_name: str | None = None
+    class_name: str | None = None
+    signature: str | None = None
+    start_line: int | None = None
+    end_line: int | None = None
+
+    # Doc-specific (None for non-docs)
+    section_title: str | None = None
+
+    # Issue / PR specific
+    issue_number: int | None = None
+    pr_number: int | None = None
+    state: str | None = None
+    labels: list[str] = field(default_factory=list)
+
+    # Multi-tenant isolation (Phase 8)
+    user_id: str | None = None
+    is_public: bool = False
+
+    metadata: dict = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# API-facing Pydantic models
+# ---------------------------------------------------------------------------
 
 
 class HistoryMessage(BaseModel):
@@ -81,3 +134,13 @@ class GraphLink(BaseModel):
 class GraphExploreResponse(BaseModel):
     nodes: list[GraphNode] = []
     links: list[GraphLink] = []
+
+# ── Phase 8.5: Summarization & Auditing ───────────────────────────────────
+
+class SnapshotResponse(BaseModel):
+    repo: str
+    snapshot: str
+
+class AuditResponse(BaseModel):
+    repo: str
+    report: str

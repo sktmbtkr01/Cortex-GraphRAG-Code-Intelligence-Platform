@@ -1,21 +1,15 @@
+import { Metadata } from "next";
+import GraphViewer from "@/components/GraphViewer";
+
+export const metadata: Metadata = {
+  title: "Graph - Cortex",
+  description: "Interactive 3D Knowledge Graph explorer",
+};
+
 export default function GraphPage() {
   return (
-    <section className="workspace">
-      <header className="page-header">
-        <p>Graph Explorer</p>
-        <h1>Explore dependencies, calls, issues, and PR relationships.</h1>
-      </header>
-      <div className="graph-shell">
-        <div className="graph-canvas">
-          <span>Interactive graph canvas</span>
-        </div>
-        <aside className="detail-panel">
-          <h2>Selection</h2>
-          <p className="muted">
-            Click a node to inspect metadata once Neo4j is connected.
-          </p>
-        </aside>
-      </div>
-    </section>
+    <div style={{ width: "100%", height: "100%" }}>
+      <GraphViewer />
+    </div>
   );
 }

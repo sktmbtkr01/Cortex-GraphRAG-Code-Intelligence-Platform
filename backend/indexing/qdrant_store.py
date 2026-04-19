@@ -1,2 +1,308 @@
-class QdrantStore:
-    pass
+"""
+Cortex Vector Store — Manages Qdrant Cloud connectivity and schema.
+"""
+
+import datetime
+from typing import Any
+
+from qdrant_client import QdrantClient
+from qdrant_client.http import models as qmodels
+from qdrant_client.http.exceptions import UnexpectedResponse
+
+from core.config import settings
+from core.logger import get_logger
+from models.schemas import Chunk
+
+logger = get_logger(__name__)
+
+
+def generate_chunk_id(chunk: Chunk) -> str:
+    """
+    Generate a deterministic UUID for a chunk based on its unique identity.
+    This ensures we OVERWRITE exactly the same chunk on re-indexing, rather than duplicating.
+    """
+    import hashlib
+    import uuid
+
+    # Base identity: repo, file, chunk_type
+    identity_str = f"{chunk.repo}::{chunk.file_path}::{chunk.chunk_type}"
+
+    # Add specific discriminators
+    if chunk.function_name:
+        identity_str += f"::{chunk.function_name}"
+    if chunk.class_name:
+        identity_str += f"::{chunk.class_name}"
+    if chunk.section_title:
+        identity_str += f"::{chunk.section_title}"
+    if chunk.start_line is not None:
+        identity_str += f"::{chunk.start_line}"
+    if chunk.issue_number is not None:
+        identity_str += f"::issue{chunk.issue_number}"
+    if chunk.pr_number is not None:
+        identity_str += f"::pr{chunk.pr_number}"
+
+    # Hash to UUID
+    identity_hash = hashlib.md5(identity_str.encode("utf-8")).hexdigest()
+    return str(uuid.UUID(identity_hash))
+
+
+class VectorStore:
+    def __init__(self):
+        if not settings.qdrant_url or not settings.qdrant_api_key:
+            raise ValueError("Qdrant credentials missing from environment.")
+
+        self.client = QdrantClient(
+            url=settings.qdrant_url,
+            api_key=settings.qdrant_api_key,
+            timeout=30.0,
+        )
+        self.collection_name = settings.qdrant_collection  # default: cortex_kb
+        self.dense_dim = settings.embedding_dimensions     # default: 768
+
+    def ensure_collection(self) -> None:
+        """Create the collection if it doesn't already exist, configuring dense + sparse vectors."""
+        try:
+            self.client.get_collection(self.collection_name)
+            logger.info(f"Qdrant collection '{self.collection_name}' exists.")
+        except UnexpectedResponse as e:
+            if "Not found" in str(e):
+                logger.info(f"Creating Qdrant collection '{self.collection_name}'...")
+                self.client.create_collection(
+                    collection_name=self.collection_name,
+                    vectors_config=qmodels.VectorParams(
+                        size=self.dense_dim,
+                        distance=qmodels.Distance.COSINE,
+                    ),
+                    sparse_vectors_config={
+                        "sparse": qmodels.SparseVectorParams(
+                            index=qmodels.SparseIndexParams(
+                                on_disk=False,
+                            )
+                        )
+                    },
+                )
+                
+                # Payload indices for fast filtering
+                self._create_payload_indices()
+            else:
+                raise
+
+    def _create_payload_indices(self) -> None:
+        """Create indices on payload fields used frequently in filtering operations."""
+        indices = [
+            ("repo", qmodels.PayloadSchemaType.KEYWORD),
+            ("file_path", qmodels.PayloadSchemaType.KEYWORD),
+            ("source_type", qmodels.PayloadSchemaType.KEYWORD),
+            ("chunk_type", qmodels.PayloadSchemaType.KEYWORD),
+            ("user_id", qmodels.PayloadSchemaType.KEYWORD),
+            ("is_public", qmodels.PayloadSchemaType.BOOL),
+        ]
+        
+        for field, schema_type in indices:
+            self.client.create_payload_index(
+                collection_name=self.collection_name,
+                field_name=field,
+                field_schema=schema_type,
+            )
+        logger.info("Created metadata payload indices in Qdrant.")
+
+    def upsert_chunks(self, chunks: list[Chunk], dense_vectors: list[list[float]], sparse_vectors: list[dict]) -> None:
+        """
+        Upsert a batch of chunks into Qdrant.
+        """
+        if not chunks:
+            return
+
+        points = []
+        now_str = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+        for chunk, dense, sparse in zip(chunks, dense_vectors, sparse_vectors):
+            # Deterministic UUID prevents duplication on re-indexing
+            point_id = generate_chunk_id(chunk)
+            chunk.id = point_id  # sync the object natively
+
+            payload: dict[str, Any] = {
+                "repo": chunk.repo,
+                "file_path": chunk.file_path,
+                "language": chunk.language,
+                "source_type": chunk.source_type,
+                "chunk_type": chunk.chunk_type,
+                "function_name": chunk.function_name,
+                "class_name": chunk.class_name,
+                "signature": chunk.signature,
+                "start_line": chunk.start_line,
+                "end_line": chunk.end_line,
+                "section_title": chunk.section_title,
+                "text": chunk.text,
+                "issue_number": chunk.issue_number,
+                "pr_number": chunk.pr_number,
+                "state": chunk.state,
+                "labels": chunk.labels,
+                "indexed_at": now_str,
+                # Multi-tenant isolation (Phase 8)
+                "user_id": chunk.user_id,
+                "is_public": chunk.is_public,
+            }
+            
+            # Merge custom metadata (like large_function full_body)
+            payload.update(chunk.metadata)
+
+            points.append(
+                qmodels.PointStruct(
+                    id=point_id,
+                    vector={
+                        "": dense,  # Default dense vector
+                        "sparse": qmodels.SparseVector(
+                            indices=sparse["indices"],
+                            values=sparse["values"],
+                        )
+                    },
+                    payload=payload,
+                )
+            )
+
+        # Upsert in bulk (Qdrant handles large batch splits gracefully for points < memory limit)
+        self.client.upsert(
+            collection_name=self.collection_name,
+            points=points,
+        )
+        logger.info(f"Upserted {len(points)} chunks to Qdrant collection '{self.collection_name}'.")
+
+    def delete_by_file(self, repo: str, file_path: str) -> None:
+        """Filter-delete all chunks associated with a specific file. Used for webhooks."""
+        self.client.delete(
+            collection_name=self.collection_name,
+            points_selector=qmodels.FilterSelector(
+                filter=qmodels.Filter(
+                    must=[
+                        qmodels.FieldCondition(
+                            key="repo",
+                            match=qmodels.MatchValue(value=repo)
+                        ),
+                        qmodels.FieldCondition(
+                            key="file_path",
+                            match=qmodels.MatchValue(value=file_path)
+                        ),
+                    ]
+                )
+            )
+        )
+        logger.info(f"Deleted chunks for {repo}/{file_path}")
+
+    def delete_by_repo(self, repo: str, user_id: str | None = None) -> None:
+        """Filter-delete all chunks associated with a specific repo, scoped by user_id."""
+        must_conditions = [
+            qmodels.FieldCondition(
+                key="repo",
+                match=qmodels.MatchValue(value=repo)
+            ),
+        ]
+        if user_id:
+            must_conditions.append(
+                qmodels.FieldCondition(
+                    key="user_id",
+                    match=qmodels.MatchValue(value=user_id)
+                )
+            )
+        self.client.delete(
+            collection_name=self.collection_name,
+            points_selector=qmodels.FilterSelector(
+                filter=qmodels.Filter(must=must_conditions)
+            )
+        )
+        logger.info(f"Deleted all chunks for repo {repo} (user={user_id})")
+
+    def search(
+        self,
+        query_dense: list[float],
+        query_sparse: dict[str, Any],
+        filters: dict[str, str] | None = None,
+        top_k: int = 10,
+        user_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Hybrid search using default RRF (Reciprocal Rank Fusion) built into Qdrant.
+        
+        Row-level tenant isolation: results are automatically filtered to chunks
+        owned by user_id OR marked as is_public=true.
+        """
+        must_conditions = []
+        if filters:
+            for k, v in filters.items():
+                must_conditions.append(
+                    qmodels.FieldCondition(
+                        key=k, match=qmodels.MatchValue(value=v)
+                    )
+                )
+
+        # Tenant isolation: user sees their own data + public data
+        if user_id:
+            must_conditions.append(
+                qmodels.Filter(
+                    should=[
+                        qmodels.FieldCondition(
+                            key="user_id",
+                            match=qmodels.MatchValue(value=user_id)
+                        ),
+                        qmodels.FieldCondition(
+                            key="is_public",
+                            match=qmodels.MatchValue(value=True)
+                        ),
+                    ]
+                )
+            )
+
+        qdrant_filters = qmodels.Filter(must=must_conditions) if must_conditions else None
+
+        search_result = self.client.query_batch_points(
+            collection_name=self.collection_name,
+            requests=[
+                # Dense search request
+                qmodels.QueryRequest(
+                    query=query_dense,
+                    filter=qdrant_filters,
+                    limit=top_k,
+                    with_payload=True,
+                ),
+                # Sparse search request
+                qmodels.QueryRequest(
+                    query=qmodels.SparseVector(
+                        indices=query_sparse["indices"],
+                        values=query_sparse["values"],
+                    ),
+                    using="sparse",
+                    filter=qdrant_filters,
+                    limit=top_k,
+                    with_payload=True,
+                ),
+            ],
+        )
+
+        # Merge, deduplicate, and sort using naïve score addition
+        merged_scores = {}
+        payloads = {}
+
+        dense_results = search_result[0].points
+        sparse_results = search_result[1].points
+
+        # Rank-based scoring (RRF approximation: score = 1 / (rank + 60))
+        for rank, hit in enumerate(dense_results):
+            merged_scores[hit.id] = merged_scores.get(hit.id, 0.0) + (1.0 / (rank + 60.0))
+            payloads[hit.id] = hit.payload
+
+        for rank, hit in enumerate(sparse_results):
+            merged_scores[hit.id] = merged_scores.get(hit.id, 0.0) + (1.0 / (rank + 60.0))
+            payloads[hit.id] = hit.payload
+
+        # Sort combined results
+        sorted_ids = sorted(merged_scores.keys(), key=lambda i: merged_scores[i], reverse=True)
+        
+        final_results = []
+        for sid in sorted_ids[:top_k]:
+            final_results.append({
+                "id": str(sid),
+                "score": merged_scores[sid],
+                "payload": payloads[sid]
+            })
+
+        return final_results

@@ -14,12 +14,17 @@ class Settings(BaseSettings):
     environment: str = "development"
     backend_url: str = "http://localhost:8000"
     frontend_url: str = "http://localhost:3000"
-    embedding_backend: str = "jina"
-    embedding_model: str = "jina-embeddings-v3"
-    embedding_dimensions: int = 1024
+    embedding_backend: str = "gemini"
+    embedding_model: str = "gemini-embedding-001"
+    embedding_dimensions: int = 768
 
     github_pat: str | None = None
     github_webhook_secret: str | None = None
+    github_oauth_client_id: str | None = None
+    github_oauth_client_secret: str | None = None
+
+    # Multi-tenant safety: reject repos larger than this (in MB)
+    max_repo_size_mb: int = 500
 
     qdrant_url: str | None = None
     qdrant_api_key: str | None = None
@@ -31,7 +36,6 @@ class Settings(BaseSettings):
 
     groq_api_key: str | None = None
     gemini_api_key: str | None = None
-    jina_api_key: str | None = None
 
     cors_origins_raw: str = Field(
         default="http://localhost:3000",

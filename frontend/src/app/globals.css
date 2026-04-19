@@ -277,5 +277,161 @@ select {
   .composer,
   .form-row {
     flex-direction: column;
+}
+
+.spinner {
+  display: inline-block;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  100% { transform: rotate(360deg); }
+}
+
+.code-block-wrapper pre {
+  padding: 16px;
+  border-radius: 6px;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  margin: 12px 0;
+  font-family: var(--font-mono);
+}
+
+.fallback-code {
+  padding: 16px;
+  border-radius: 6px;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  margin: 12px 0;
+  font-family: var(--font-mono);
+  background: #0d1117;
+  color: #c9d1d9;
+}
+
+/* ── Login Page ──────────────────────────────────────── */
+
+.login-page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 24px;
+}
+
+.login-container {
+  max-width: 720px;
+  width: 100%;
+}
+
+.login-brand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin-bottom: 40px;
+}
+
+.login-cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
+}
+
+@media (max-width: 640px) {
+  .login-cards {
+    grid-template-columns: 1fr;
   }
 }
+
+.login-card {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  padding: 28px;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+}
+
+.login-card-primary {
+  border-color: var(--accent);
+  background: rgba(119, 200, 107, 0.04);
+}
+
+.login-card-icon {
+  width: 48px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: rgba(119, 200, 107, 0.12);
+  color: var(--accent);
+  margin-bottom: 16px;
+}
+
+.login-card h2 {
+  font-size: 1.1rem;
+  margin-bottom: 8px;
+}
+
+.login-card p {
+  font-size: 0.85rem;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.login-features {
+  list-style: none;
+  margin-top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 0.82rem;
+  color: var(--foreground);
+}
+
+.login-features li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.login-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: auto;
+  padding: 12px 20px;
+  border-radius: 6px;
+  font-weight: 600;
+  font-size: 0.9rem;
+  cursor: pointer;
+  border: 1px solid var(--line);
+  background: var(--panel-strong);
+  color: var(--foreground);
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.login-btn:hover {
+  border-color: var(--accent);
+  background: rgba(119, 200, 107, 0.08);
+}
+
+.login-btn-github {
+  background: var(--accent);
+  color: #10120f;
+  border-color: var(--accent);
+  margin-top: 20px;
+}
+
+.login-btn-github:hover {
+  background: var(--accent-strong);
+}
+
+/* ── Sidebar User ──────────────────────────────────── */
+
+.sidebar-user {
+  margin-top: auto;
+  border-top: 1px solid var(--line);
+  padding-top: 18px;
+}
+

@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.routes import router as api_router
+from api.auth_routes import router as auth_router
 from api.webhook import router as webhook_router
 from core.config import settings
 
@@ -22,6 +23,7 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(api_router, prefix="/api/v1")
+    app.include_router(auth_router, prefix="/api/v1")
     app.include_router(webhook_router, prefix="/api/v1")
 
     @app.get("/health", tags=["system"])
