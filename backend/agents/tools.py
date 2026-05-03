@@ -176,7 +176,13 @@ async def get_file_content(
     dummy_dense = [0.0] * vs.dense_dim
     dummy_sparse = {"indices": [], "values": []}
     
-    hits = vs.search(dummy_dense, dummy_sparse, filters=filters, top_k=200)
+    hits = vs.search(
+        dummy_dense,
+        dummy_sparse,
+        filters=filters,
+        top_k=200,
+        user_id=get_agent_user_context(),
+    )
     
     if not hits:
          return f"File '{file_path}' not found in index for {repo}."
@@ -223,23 +229,30 @@ def get_call_graph(function_name: str, repo: str | None = None) -> str:
     """
     logger.info(f"Tool CALL: get_call_graph(func='{function_name}', repo='{repo}')")
     neo4j = get_neo4j()
+    user_id = get_agent_user_context()
     callee_query = """
     MATCH (caller:Function {name: $func_name})-[:CALLS]->(callee:Function)
     """
     if repo:
         callee_query += " WHERE caller.repo = $repo AND callee.repo = $repo "
+    else:
+        callee_query += " WHERE true "
+    callee_query += " AND (caller.user_id = $user_id OR caller.is_public = true) AND (callee.user_id = $user_id OR callee.is_public = true) "
     callee_query += " RETURN callee.name AS callee_name, callee.repo AS repo LIMIT 20"
     
-    callees = neo4j.run_query(callee_query, {"func_name": function_name, "repo": repo})
+    callees = neo4j.run_query(callee_query, {"func_name": function_name, "repo": repo, "user_id": user_id})
     
     caller_query = """
     MATCH (caller:Function)-[:CALLS]->(callee:Function {name: $func_name})
     """
     if repo:
          caller_query += " WHERE caller.repo = $repo AND callee.repo = $repo "
+    else:
+         caller_query += " WHERE true "
+    caller_query += " AND (caller.user_id = $user_id OR caller.is_public = true) AND (callee.user_id = $user_id OR callee.is_public = true) "
     caller_query += " RETURN caller.name AS caller_name, caller.repo AS repo LIMIT 20"
     
-    callers = neo4j.run_query(caller_query, {"func_name": function_name, "repo": repo})
+    callers = neo4j.run_query(caller_query, {"func_name": function_name, "repo": repo, "user_id": user_id})
     
     if not callees and not callers:
         return f"No call graph data found for function '{function_name}'."
@@ -268,21 +281,24 @@ def get_file_history(file_path: str, repo: str | None = None) -> str:
     """
     logger.info(f"Tool CALL: get_file_history(file='{file_path}')")
     neo4j = get_neo4j()
+    user_id = get_agent_user_context()
     query = """
     MATCH (f:File)
     WHERE f.path CONTAINS $file_path
     """
     if repo:
         query += " AND f.repo = $repo "
+    query += " AND (f.user_id = $user_id OR f.is_public = true) "
         
     query += """
     OPTIONAL MATCH (pr:PullRequest)-[:MODIFIES]->(f)
     OPTIONAL MATCH (pr)-[:CLOSES]->(i:Issue)
+    WHERE (pr.user_id = $user_id OR pr.is_public = true OR pr IS NULL)
     RETURN pr.number AS pr_num, pr.title AS pr_title, pr.state AS pr_state, i.number AS linked_issue
     ORDER BY pr.number DESC LIMIT 10
     """
     
-    records = neo4j.run_query(query, {"file_path": file_path, "repo": repo})
+    records = neo4j.run_query(query, {"file_path": file_path, "repo": repo, "user_id": user_id})
     
     if not records or all(r['pr_num'] is None for r in records):
         return f"No PR history found for file containing '{file_path}'"
@@ -306,23 +322,30 @@ def get_dependencies(module_name: str, repo: str | None = None) -> str:
     """
     logger.info(f"Tool CALL: get_dependencies(module='{module_name}')")
     neo4j = get_neo4j()
+    user_id = get_agent_user_context()
     internal_query = """
     MATCH (file:File)-[:IMPORTS]->(mod:Module {name: $module_name})
     """
     if repo:
          internal_query += " WHERE file.repo = $repo "
+    else:
+         internal_query += " WHERE true "
+    internal_query += " AND (file.user_id = $user_id OR file.is_public = true) AND (mod.user_id = $user_id OR mod.is_public = true) "
     internal_query += " RETURN file.path AS file_path LIMIT 20"
     
-    importers = neo4j.run_query(internal_query, {"module_name": module_name, "repo": repo})
+    importers = neo4j.run_query(internal_query, {"module_name": module_name, "repo": repo, "user_id": user_id})
     
     ext_query = """
     MATCH (r:Repository)-[:DEPENDS_ON]->(d:Dependency {name: $module_name})
     """
     if repo:
          ext_query += " WHERE r.full_name = $repo "
+    else:
+         ext_query += " WHERE true "
+    ext_query += " AND (r.user_id = $user_id OR r.is_public = true) AND (d.user_id = $user_id OR d.is_public = true) "
     ext_query += " RETURN d.version AS version LIMIT 1"
     
-    deps = neo4j.run_query(ext_query, {"module_name": module_name, "repo": repo})
+    deps = neo4j.run_query(ext_query, {"module_name": module_name, "repo": repo, "user_id": user_id})
     
     res = f"Dependencies for '{module_name}':\n"
     if deps:

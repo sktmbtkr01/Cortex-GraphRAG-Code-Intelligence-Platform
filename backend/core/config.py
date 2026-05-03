@@ -14,14 +14,26 @@ class Settings(BaseSettings):
     environment: str = "development"
     backend_url: str = "http://localhost:8000"
     frontend_url: str = "http://localhost:3000"
-    embedding_backend: str = "gemini"
-    embedding_model: str = "gemini-embedding-001"
+    embedding_backend: str = "fastembed"
+    embedding_model: str = "BAAI/bge-base-en-v1.5"
     embedding_dimensions: int = 768
+    embedding_batch_size: int = 64
+    embedding_cache_dir: str | None = None
+    embedding_local_files_only: bool = False
 
     github_pat: str | None = None
     github_webhook_secret: str | None = None
     github_oauth_client_id: str | None = None
     github_oauth_client_secret: str | None = None
+    github_fetch_concurrency: int = 25
+    file_processing_concurrency: int = 8
+    github_request_timeout_seconds: float = 30.0
+    github_connect_timeout_seconds: float = 10.0
+    github_max_keepalive_connections: int = 25
+    github_max_connections: int = 50
+    github_retry_attempts: int = 3
+    ingest_job_max_age_seconds: int = 3600
+    ingest_job_max_events: int = 500
 
     # Multi-tenant safety: reject repos larger than this (in MB)
     max_repo_size_mb: int = 500

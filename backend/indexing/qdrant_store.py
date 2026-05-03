@@ -11,6 +11,7 @@ from qdrant_client.http.exceptions import UnexpectedResponse
 
 from core.config import settings
 from core.logger import get_logger
+from core.tenant import tenant_prefix
 from models.schemas import Chunk
 
 logger = get_logger(__name__)
@@ -24,8 +25,9 @@ def generate_chunk_id(chunk: Chunk) -> str:
     import hashlib
     import uuid
 
-    # Base identity: repo, file, chunk_type
-    identity_str = f"{chunk.repo}::{chunk.file_path}::{chunk.chunk_type}"
+    # Base identity includes tenant ownership to prevent same-repo overwrites
+    # between users while preserving deterministic re-indexing for one user.
+    identity_str = f"{tenant_prefix(chunk.user_id, chunk.is_public)}::{chunk.repo}::{chunk.file_path}::{chunk.chunk_type}"
 
     # Add specific discriminators
     if chunk.function_name:
@@ -59,10 +61,27 @@ class VectorStore:
         self.collection_name = settings.qdrant_collection  # default: cortex_kb
         self.dense_dim = settings.embedding_dimensions     # default: 768
 
+    def _get_collection_dense_size(self, collection_info: Any) -> int | None:
+        """Best-effort extraction of the existing dense vector size from Qdrant."""
+        vectors_config = collection_info.config.params.vectors
+
+        if isinstance(vectors_config, dict):
+            default_vector = vectors_config.get("") or vectors_config.get("default")
+            return getattr(default_vector, "size", None)
+
+        return getattr(vectors_config, "size", None)
+
     def ensure_collection(self) -> None:
         """Create the collection if it doesn't already exist, configuring dense + sparse vectors."""
         try:
-            self.client.get_collection(self.collection_name)
+            collection_info = self.client.get_collection(self.collection_name)
+            existing_dense_dim = self._get_collection_dense_size(collection_info)
+            if existing_dense_dim is not None and existing_dense_dim != self.dense_dim:
+                raise ValueError(
+                    f"Qdrant collection '{self.collection_name}' has dense vector "
+                    f"dimension {existing_dense_dim}, but EMBEDDING_DIMENSIONS={self.dense_dim}. "
+                    "Recreate the collection or switch to a matching embedding model."
+                )
             logger.info(f"Qdrant collection '{self.collection_name}' exists.")
         except UnexpectedResponse as e:
             if "Not found" in str(e):
@@ -191,6 +210,18 @@ class VectorStore:
 
     def delete_by_repo(self, repo: str, user_id: str | None = None) -> None:
         """Filter-delete all chunks associated with a specific repo, scoped by user_id."""
+        try:
+            self.client.get_collection(self.collection_name)
+        except UnexpectedResponse as e:
+            if "not found" in str(e).lower() or "404" in str(e):
+                logger.info(
+                    "Skipping Qdrant delete for %s because collection '%s' does not exist.",
+                    repo,
+                    self.collection_name,
+                )
+                return
+            raise
+
         must_conditions = [
             qmodels.FieldCondition(
                 key="repo",

@@ -15,8 +15,6 @@ interface User {
 
 interface AuthState {
   user: User | null;
-  accessToken: string | null;
-  githubToken: string | null; // Ephemeral — in-memory only, NEVER localStorage
   isLoading: boolean;
   isAuthenticated: boolean;
 }
@@ -24,8 +22,9 @@ interface AuthState {
 interface AuthContextValue extends AuthState {
   loginWithGitHub: () => void;
   loginAsGuest: (name?: string) => Promise<void>;
-  logout: () => void;
+  logout: () => Promise<void>;
   authHeaders: () => HeadersInit;
+  apiFetch: (path: string, init?: RequestInit) => Promise<Response>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -36,41 +35,49 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
+/**
+ * Cookie-based auth. The JWT lives ONLY in an HttpOnly cookie set by the
+ * backend. The browser never sees a token string. The GitHub access token
+ * lives server-side in a session store keyed by user_id and is looked up
+ * per-request — the frontend no longer ships it in any header.
+ *
+ * All requests that need the session cookie MUST set credentials: "include".
+ * Use `apiFetch()` or remember to pass it manually.
+ */
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<AuthState>({
     user: null,
-    accessToken: null,
-    githubToken: null,
     isLoading: true,
     isAuthenticated: false,
   });
 
-  // Restore session from localStorage (JWT only, never the GitHub token)
+  // On mount, ask the backend "who am I?" using the cookie.
   useEffect(() => {
-    const stored = localStorage.getItem("cortex_auth");
-    if (stored) {
+    (async () => {
       try {
-        const parsed = JSON.parse(stored);
-        setState({
-          user: parsed.user,
-          accessToken: parsed.accessToken,
-          githubToken: null, // Ephemeral — gone on refresh
-          isLoading: false,
-          isAuthenticated: true,
+        const res = await fetch(`${API_URL}/api/v1/auth/me`, {
+          credentials: "include",
         });
-      } catch {
-        localStorage.removeItem("cortex_auth");
-        setState((s) => ({ ...s, isLoading: false }));
+        if (res.ok) {
+          const data = await res.json();
+          setState({
+            user: {
+              user_id: data.user_id,
+              login: data.login,
+              provider: data.provider,
+              avatar_url: data.avatar_url,
+            },
+            isLoading: false,
+            isAuthenticated: true,
+          });
+          return;
+        }
+      } catch (e) {
+        // network failure — treat as unauthenticated
       }
-    } else {
-      setState((s) => ({ ...s, isLoading: false }));
-    }
+      setState({ user: null, isLoading: false, isAuthenticated: false });
+    })();
   }, []);
-
-  // Persist JWT + user (but NOT githubToken)
-  const persistSession = (user: User, accessToken: string) => {
-    localStorage.setItem("cortex_auth", JSON.stringify({ user, accessToken }));
-  };
 
   // GitHub OAuth — redirect to GitHub
   const loginWithGitHub = useCallback(async () => {
@@ -88,28 +95,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
-  // Guest login — no GitHub needed
+  // Guest login — cookie gets set by the server on success
   const loginAsGuest = useCallback(async (name?: string) => {
     try {
       const res = await fetch(`${API_URL}/api/v1/auth/guest`, {
         method: "POST",
+        credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ display_name: name || "Guest" }),
       });
+      if (!res.ok) throw new Error("Guest login failed");
       const data = await res.json();
 
-      const user: User = {
-        user_id: data.user.user_id,
-        login: data.user.login,
-        provider: "guest",
-        avatar_url: null,
-      };
-
-      persistSession(user, data.access_token);
       setState({
-        user,
-        accessToken: data.access_token,
-        githubToken: null,
+        user: {
+          user_id: data.user.user_id,
+          login: data.user.login,
+          provider: "guest",
+          avatar_url: null,
+        },
         isLoading: false,
         isAuthenticated: true,
       });
@@ -123,27 +127,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       const res = await fetch(`${API_URL}/api/v1/auth/github/callback`, {
         method: "POST",
+        credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ code }),
       });
+      if (!res.ok) return false;
       const data = await res.json();
 
-      const user: User = {
-        user_id: data.user.user_id,
-        login: data.user.login,
-        provider: "github",
-        avatar_url: data.user.avatar_url,
-      };
-
-      persistSession(user, data.access_token);
       setState({
-        user,
-        accessToken: data.access_token,
-        githubToken: data.github_token, // Ephemeral — lives only in memory
+        user: {
+          user_id: data.user.user_id,
+          login: data.user.login,
+          provider: "github",
+          avatar_url: data.user.avatar_url,
+        },
         isLoading: false,
         isAuthenticated: true,
       });
-
       return true;
     } catch (e) {
       console.error("GitHub callback failed", e);
@@ -151,32 +151,33 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
-  // Logout
-  const logout = useCallback(() => {
-    localStorage.removeItem("cortex_auth");
-    setState({
-      user: null,
-      accessToken: null,
-      githubToken: null,
-      isLoading: false,
-      isAuthenticated: false,
-    });
+  // Logout — hit backend to clear cookie + purge server session entry
+  const logout = useCallback(async () => {
+    try {
+      await fetch(`${API_URL}/api/v1/auth/logout`, {
+        method: "POST",
+        credentials: "include",
+      });
+    } catch (e) {
+      // ignore network errors — still clear local state
+    }
+    setState({ user: null, isLoading: false, isAuthenticated: false });
   }, []);
 
-  // Auth headers for API calls
+  // Auth headers are now trivial — no tokens live on the client.
+  // Kept as a no-op for backwards compatibility with existing call sites.
   const authHeaders = useCallback((): HeadersInit => {
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-    };
-    if (state.accessToken) {
-      headers["Authorization"] = `Bearer ${state.accessToken}`;
-    }
-    // Pass ephemeral GitHub token for privileged API calls
-    if (state.githubToken) {
-      headers["X-GitHub-Token"] = state.githubToken;
-    }
-    return headers;
-  }, [state.accessToken, state.githubToken]);
+    return { "Content-Type": "application/json" };
+  }, []);
+
+  // Convenience wrapper: prepends API_URL, always sends the cookie.
+  const apiFetch = useCallback(
+    (path: string, init?: RequestInit): Promise<Response> => {
+      const url = path.startsWith("http") ? path : `${API_URL}${path}`;
+      return fetch(url, { ...init, credentials: "include" });
+    },
+    []
+  );
 
   const value: AuthContextValue = {
     ...state,
@@ -184,6 +185,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     loginAsGuest,
     logout,
     authHeaders,
+    apiFetch,
   };
 
   // Expose handleGitHubCallback via a global for the callback page

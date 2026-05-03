@@ -2,7 +2,8 @@
 
 import { usePathname } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
-import Sidebar from "@/components/Sidebar";
+import TopNav from "@/components/TopNav";
+import GlobalBrainBar from "@/components/GlobalBrainBar";
 
 // Pages that don't require authentication
 const PUBLIC_PAGES = ["/login", "/auth/callback"];
@@ -37,11 +38,12 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
     return null;
   }
 
-  // Authenticated: render full app shell with sidebar
+  // Authenticated: render full app shell with top navigation
   return (
-    <div className="app-shell">
-      <Sidebar />
-      <main className="content">{children}</main>
+    <div className="app-shell-top">
+      <TopNav />
+      <GlobalBrainBar />
+      <main className="content top-shell-content">{children}</main>
     </div>
   );
 }

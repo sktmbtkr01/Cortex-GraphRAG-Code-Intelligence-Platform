@@ -12,21 +12,54 @@ import time
 from typing import Any
 
 import jwt
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import Depends, HTTPException, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
 from core.config import settings
 from core.logger import get_logger
+from core.session_store import session_store
 
 logger = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
-# JWT Configuration
+# JWT + Cookie Configuration
 # ---------------------------------------------------------------------------
 
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_SECONDS = 86400  # 24 hours
+
+# Session cookie — HttpOnly, never readable by JS.
+SESSION_COOKIE_NAME = "cortex_session"
+
+
+def _cookie_is_secure() -> bool:
+    """Use Secure cookies in production (HTTPS); disable for localhost dev."""
+    return settings.environment.lower() not in ("development", "dev", "local")
+
+
+def set_session_cookie(response: Response, jwt_token: str) -> None:
+    """Attach the JWT to the response as an HttpOnly cookie."""
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=jwt_token,
+        max_age=JWT_EXPIRATION_SECONDS,
+        httponly=True,
+        secure=_cookie_is_secure(),
+        samesite="lax",
+        path="/",
+    )
+
+
+def clear_session_cookie(response: Response) -> None:
+    """Invalidate the session cookie on the client."""
+    response.delete_cookie(
+        key=SESSION_COOKIE_NAME,
+        path="/",
+        samesite="lax",
+        secure=_cookie_is_secure(),
+        httponly=True,
+    )
 
 
 def _get_jwt_secret() -> str:
@@ -93,6 +126,16 @@ def decode_access_token(token: str) -> dict[str, Any]:
 _bearer_scheme = HTTPBearer(auto_error=False)
 
 
+def _extract_jwt(request: Request, credentials: HTTPAuthorizationCredentials | None) -> str | None:
+    """Prefer HttpOnly session cookie; fall back to Bearer header for programmatic use."""
+    cookie_token = request.cookies.get(SESSION_COOKIE_NAME)
+    if cookie_token:
+        return cookie_token
+    if credentials and credentials.credentials:
+        return credentials.credentials
+    return None
+
+
 async def get_current_user(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
@@ -101,13 +144,16 @@ async def get_current_user(
     Extract the authenticated user from the request.
 
     Auth flow:
-    1. Check for Bearer token in Authorization header (JWT from our login flow)
-    2. If no token, fall back to a default "anonymous" guest user for development
+    1. Read JWT from the `cortex_session` HttpOnly cookie (primary path).
+    2. Fall back to `Authorization: Bearer` header for programmatic/test clients.
+    3. In development, fall back to a default guest user with the env PAT.
 
-    In production, step 2 would be removed and all requests would require auth.
+    The ephemeral GitHub token is fetched from the server-side session store
+    keyed by user_id — it is NEVER read from the request body/headers.
     """
-    if credentials and credentials.credentials:
-        token = credentials.credentials
+    token = _extract_jwt(request, credentials)
+
+    if token:
         payload = decode_access_token(token)
 
         user = AuthenticatedUser(
@@ -115,30 +161,13 @@ async def get_current_user(
             login=payload.get("login", "unknown"),
             provider=payload.get("provider", "unknown"),
             avatar_url=payload.get("avatar_url"),
-            github_token=None,  # Token is NOT stored in JWT — retrieved from session separately
+            github_token=session_store.get_github_token(payload["sub"]),
         )
-
-        # Check if the frontend passed the ephemeral GitHub token in a custom header
-        gh_token = request.headers.get("X-GitHub-Token")
-        if gh_token:
-            user.github_token = gh_token
-
         return user
-
-    # Development fallback: allow unauthenticated access with a default user
-    if settings.environment == "development":
-        logger.debug("No auth token provided — using development guest user")
-        return AuthenticatedUser(
-            user_id="dev:local",
-            login="dev-user",
-            provider="guest",
-            github_token=settings.github_pat,  # Use env PAT in dev mode
-        )
 
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Authentication required",
-        headers={"WWW-Authenticate": "Bearer"},
     )
 
 
@@ -168,7 +197,9 @@ async def exchange_github_code(code: str) -> dict[str, Any]:
     """
     import httpx
 
-    if not settings.github_oauth_client_id or not settings.github_oauth_client_secret:
+    client_id = (settings.github_oauth_client_id or "").strip()
+    client_secret = (settings.github_oauth_client_secret or "").strip()
+    if not client_id or not client_secret:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="GitHub OAuth not configured on the server",
@@ -178,9 +209,9 @@ async def exchange_github_code(code: str) -> dict[str, Any]:
     async with httpx.AsyncClient() as client:
         token_response = await client.post(
             "https://github.com/login/oauth/access_token",
-            json={
-                "client_id": settings.github_oauth_client_id,
-                "client_secret": settings.github_oauth_client_secret,
+            data={
+                "client_id": client_id,
+                "client_secret": client_secret,
                 "code": code,
             },
             headers={"Accept": "application/json"},
@@ -189,6 +220,11 @@ async def exchange_github_code(code: str) -> dict[str, Any]:
 
     access_token = token_data.get("access_token")
     if not access_token:
+        logger.warning(
+            "GitHub OAuth token exchange failed: error=%s description=%s",
+            token_data.get("error"),
+            token_data.get("error_description"),
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"GitHub OAuth failed: {token_data.get('error_description', 'unknown error')}",
@@ -214,10 +250,13 @@ async def exchange_github_code(code: str) -> dict[str, Any]:
         login=login,
         provider="github",
         avatar_url=avatar_url,
-        github_token=access_token,  # Ephemeral — only lives in this response
+        github_token=access_token,  # Will be stored server-side; not returned to browser
     )
 
-    # Create our own JWT for subsequent API calls
+    # Store the GitHub token server-side — the browser never sees it.
+    session_store.set_github_token(user.user_id, access_token)
+
+    # Create our own JWT for subsequent API calls (will be set as HttpOnly cookie)
     jwt_token = create_access_token(user)
 
     return {
@@ -228,5 +267,4 @@ async def exchange_github_code(code: str) -> dict[str, Any]:
             "provider": user.provider,
             "avatar_url": user.avatar_url,
         },
-        "github_token": access_token,  # Frontend stores in-memory only
     }

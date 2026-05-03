@@ -30,6 +30,7 @@ export default function GraphViewer() {
   const { authHeaders } = useAuth();
   const [graphData, setGraphData] = useState<{ nodes: GraphNode[]; links: GraphLink[] }>({ nodes: [], links: [] });
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
   const [repo, setRepo] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
@@ -38,18 +39,26 @@ export default function GraphViewer() {
 
   useEffect(() => {
     // Fetch repos for the dropdown
-    fetch(`${API_URL}/api/v1/repos`, { headers: authHeaders() })
-      .then((res) => res.json())
+    fetch(`${API_URL}/api/v1/repos`, { headers: authHeaders(), credentials: "include" })
+      .then((res) => {
+        if (!res.ok) throw new Error(`Failed to load repos (${res.status})`);
+        return res.json();
+      })
       .then((data) => {
-        const repoNames = data.map((r: any) => r.repo);
+        const repoNames = Array.isArray(data) ? data.map((r: any) => r.repo).filter(Boolean) : [];
         setAllRepos(repoNames);
         if (repoNames.length > 0) setRepo(repoNames[0]);
       })
-      .catch((e) => console.error("Failed to fetch repos", e));
-  }, []);
+      .catch((e) => {
+        const message = e instanceof Error ? e.message : "Failed to fetch repos";
+        setError(message);
+        console.error("Failed to fetch repos", e);
+      });
+  }, [API_URL, authHeaders]);
 
   const fetchGraphData = useCallback(async () => {
     setLoading(true);
+    setError("");
     // Phase 8.4: Single-repo visual constraint — repo is required
     if (!repo || repo === "all") {
       setGraphData({ nodes: [], links: [] });
@@ -60,11 +69,23 @@ export default function GraphViewer() {
     if (searchTerm) url += `&center=${encodeURIComponent(searchTerm)}`;
 
     try {
-      const res = await fetch(url, { headers: authHeaders() });
+      const res = await fetch(url, { headers: authHeaders(), credentials: "include" });
+      if (!res.ok) {
+        let detail = `Graph request failed (${res.status})`;
+        try {
+          const body = await res.json();
+          detail = body?.detail || detail;
+        } catch {
+          // keep the status-based message
+        }
+        throw new Error(detail);
+      }
       const data = await res.json();
+      const rawNodes = Array.isArray(data.nodes) ? data.nodes : [];
+      const rawLinks = Array.isArray(data.links) ? data.links : [];
       
       // Post-process data for 3D visualization
-      const processedNodes = data.nodes.map((n: GraphNode) => {
+      const processedNodes = rawNodes.map((n: GraphNode) => {
         // Color mapping by type
         let color = "#a9ad9e"; // default muted
         let val = 3;
@@ -88,13 +109,15 @@ export default function GraphViewer() {
         };
       });
 
-      setGraphData({ nodes: processedNodes, links: data.links });
+      setGraphData({ nodes: processedNodes, links: rawLinks });
     } catch (e) {
+      const message = e instanceof Error ? e.message : "Failed to fetch graph data";
+      setError(message);
       console.error("Failed to fetch graph data", e);
     } finally {
       setLoading(false);
     }
-  }, [repo, searchTerm]);
+  }, [API_URL, authHeaders, repo, searchTerm]);
 
   useEffect(() => {
     fetchGraphData();
@@ -138,6 +161,7 @@ export default function GraphViewer() {
       {/* 3D Force Graph */}
       <div className="graph-canvas" style={{ flexGrow: 1, backgroundColor: "var(--background)" }}>
         {loading && <div style={{ position: "absolute", zIndex: 10, color: "var(--accent)" }}>Calculating Physics...</div>}
+        {error && <div style={{ position: "absolute", zIndex: 10, top: 64, left: 16, color: "var(--danger, #ff6b6b)", background: "var(--panel)", border: "1px solid var(--line)", padding: 12, maxWidth: 420 }}>{error}</div>}
         <ForceGraph3D
           ref={fgRef}
           graphData={graphData}

@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense } from "react";
 
@@ -8,20 +8,26 @@ function CallbackHandler() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [status, setStatus] = useState("Processing GitHub login...");
+  const didSubmitRef = useRef(false);
 
   useEffect(() => {
+    if (didSubmitRef.current) {
+      return;
+    }
+
     const code = searchParams.get("code");
     if (!code) {
       setStatus("Error: No authorization code received from GitHub.");
       return;
     }
+    didSubmitRef.current = true;
 
     const handleCallback = (globalThis as any).__cortex_handle_github_callback;
     if (handleCallback) {
       handleCallback(code).then((success: boolean) => {
         if (success) {
           setStatus("Login successful! Redirecting...");
-          setTimeout(() => router.push("/"), 500);
+          setTimeout(() => router.push("/repos"), 500);
         } else {
           setStatus("Login failed. Please try again.");
           setTimeout(() => router.push("/login"), 2000);

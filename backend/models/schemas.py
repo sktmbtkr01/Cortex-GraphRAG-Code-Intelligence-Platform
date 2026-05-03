@@ -77,6 +77,13 @@ class IngestResponse(BaseModel):
     message: str
 
 
+class IngestJobResponse(BaseModel):
+    job_id: str
+    status: str
+    repo: str
+    message: str
+
+
 class QueryRequest(BaseModel):
     query: str
     repo: str | None = None
@@ -105,6 +112,7 @@ class QueryResponse(BaseModel):
 class RepoStatus(BaseModel):
     repo: str
     is_private: bool = False
+    ingestion_status: str = "ready"
     file_count: int = 0
     chunk_count: int = 0
     last_indexed: datetime | None = None

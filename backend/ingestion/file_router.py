@@ -5,7 +5,7 @@ from ingestion.parsers import code_parser, markdown_parser, config_parser
 INCLUDE_EXTS = {
     ".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs", ".java", ".cs", ".rb", ".php",
     ".md", ".rst", ".txt", ".mdx",
-    ".yaml", ".yml", ".json", ".toml", ".ini"
+    ".yaml", ".yml", ".json", ".toml", ".ini", ".ipynb"
 }
 
 EXCLUDE_PATTERNS = [
@@ -59,14 +59,14 @@ def route_file(path: str, content: str) -> ParsedFile:
         
     code_exts = {".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rs", ".java", ".cs", ".rb", ".php"}
     doc_exts = {".md", ".rst", ".txt", ".mdx"}
-    config_exts = {".yaml", ".yml", ".json", ".toml", ".ini", ".env"}
+    config_exts = {".yaml", ".yml", ".json", ".toml", ".ini", ".env", ".ipynb"}
     
     # Basic extension-to-language mapping
     lang_map = {
         ".py": "python", ".js": "javascript", ".ts": "typescript", ".jsx": "javascript", ".tsx": "typescript",
         ".go": "go", ".rs": "rust", ".java": "java", ".cs": "csharp", ".rb": "ruby", ".php": "php",
         ".md": "markdown", ".rst": "restructuredtext", ".txt": "text", ".mdx": "markdown",
-        ".yaml": "yaml", ".yml": "yaml", ".json": "json", ".toml": "toml", ".ini": "ini", ".env": "env"
+        ".yaml": "yaml", ".yml": "yaml", ".json": "json", ".toml": "toml", ".ini": "ini", ".env": "env", ".ipynb": "notebook"
     }
     lang = lang_map.get(ext, "unknown")
     

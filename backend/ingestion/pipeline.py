@@ -5,10 +5,15 @@ Flow: GitHub fetch → parse → secret scan → chunk → embed → store (with
 All data is processed in-memory. No raw files are ever written to disk.
 """
 
+import asyncio
+import inspect
+from collections.abc import Awaitable, Callable
+
+from core.config import settings
 from core.logger import get_logger
 from ingestion.github_client import GitHubClient
 from ingestion.file_router import should_process_file, route_file
-from ingestion.secret_scanner import scan_text
+from ingestion.secret_scanner import count_secret_matches, redact_text
 from ingestion.parsers.issue_parser import parse as parse_issue
 from ingestion.parsers.pr_parser import parse as parse_pr
 from chunkers.ast_chunker import ASTChunker
@@ -39,6 +44,8 @@ class IngestionPipeline:
         self.content_chunker = ContentChunker()
         self.embedder = CortexEmbedder()
         self.vector_store = VectorStore()
+        self.github_fetch_concurrency = settings.github_fetch_concurrency
+        self.file_processing_concurrency = settings.file_processing_concurrency
         
         # Graph
         try:
@@ -57,8 +64,10 @@ class IngestionPipeline:
         include_issues: bool = True,
         include_prs: bool = True,
         include_commits: bool = True,
+        max_commits: int = 500,
         user_id: str | None = None,
         is_public: bool = False,
+        progress_cb: Callable[[str, str, dict | None], Awaitable[None] | None] | None = None,
     ) -> dict[str, int]:
         """
         Full ingestion pipeline: fetch → parse → scan → chunk → embed → graph.
@@ -72,6 +81,9 @@ class IngestionPipeline:
             "files_parsed": 0,
             "files_skipped": 0,
             "secrets_found": 0,
+            "files_with_secrets": 0,
+            "secrets_redacted": 0,
+            "files_skipped_for_secrets": 0,
             "chunks_created": 0,
             "graph_edges_created": 0,
         }
@@ -84,88 +96,146 @@ class IngestionPipeline:
             raise ValueError("Repo must be in the format 'owner/repo'")
 
         try:
+            await self.github_client.__aenter__()
             # ── 1. Fetch file tree ────────────────────────────────────
+            await self._emit_progress(progress_cb, "fetching_tree", "Fetching repository tree")
             tree = await self.github_client.fetch_file_tree(owner, repo_name, branch)
+            await self._emit_progress(
+                progress_cb,
+                "fetching_files",
+                f"Fetched tree with {len(tree)} items",
+                {"total": len(tree), "processed": 0},
+            )
             
             # Setup base repository node with user_id tagging
             if self.graph_enabled:
-                self.neo4j.merge_node("Repository", repo, {
+                await self._emit_progress(progress_cb, "graph_building", "Initializing repository graph node")
+                self.neo4j.merge_tenant_node("Repository", repo, {
                     "full_name": repo, 
                     "owner": owner, 
                     "name": repo_name,
                     "default_branch": branch,
-                    "user_id": user_id,
-                    "is_public": is_public,
-                })
+                }, user_id, is_public)
 
             # ── 2. Filter, fetch, parse, chunk, graph files ───────────
+            total_files = len(tree)
+            eligible_items: list[dict] = []
             for item in tree:
                 path = item["path"]
                 size = item.get("size", 0)
-                sha = item["sha"]
+                if should_process_file(path, size):
+                    eligible_items.append(item)
+                else:
+                    stats["files_skipped"] += 1
 
-                if not should_process_file(path, size):
+            await self._emit_progress(
+                progress_cb,
+                "fetching_files",
+                f"Fetching {len(eligible_items)} eligible files with concurrency {self.github_fetch_concurrency}",
+                {"total": total_files, "eligible": len(eligible_items)},
+            )
+
+            fetched_results = await self.github_client.fetch_file_contents_bulk(
+                owner,
+                repo_name,
+                eligible_items,
+                concurrency=self.github_fetch_concurrency,
+            )
+
+            fetched_ok: list[tuple[dict, str]] = []
+            total_fetched = len(fetched_results)
+            for index, (item, content, err) in enumerate(fetched_results, start=1):
+                if index == 1 or index % 25 == 0 or index == total_fetched:
+                    await self._emit_progress(
+                        progress_cb,
+                        "fetching_files",
+                        f"Fetched file content {index}/{total_fetched}",
+                        {"total": total_fetched, "processed": index},
+                    )
+
+                if err is not None or content is None:
+                    logger.warning(f"Failed to fetch content for {item.get('path')}: {err}")
                     stats["files_skipped"] += 1
                     continue
+                fetched_ok.append((item, content))
 
-                # Content is fetched in-memory — no disk writes
-                try:
-                    content = await self.github_client.fetch_file_content(owner, repo_name, sha)
-                except Exception as e:
-                    logger.warning(f"Failed to fetch content for {path}: {e}")
-                    stats["files_skipped"] += 1
-                    continue
+            await self._emit_progress(
+                progress_cb,
+                "chunking",
+                f"Scanning and chunking {len(fetched_ok)} files with concurrency {self.file_processing_concurrency}",
+                {"total": len(fetched_ok)},
+            )
 
-                if scan_text(content):
-                    logger.warning(f"Secret detected in {path}, skipping.")
-                    stats["secrets_found"] += 1
-                    stats["files_skipped"] += 1
-                    continue
+            processed_files = await self._process_files_concurrently(
+                fetched_ok,
+                repo,
+                user_id,
+                is_public,
+            )
 
-                parsed_file = route_file(path, content)
+            # Maintain deterministic order for downstream embedding mapping
+            processed_files.sort(key=lambda r: r["index"])
+
+            for result in processed_files:
+                path = result["path"]
+
+                secret_count = int(result["secrets_redacted"])
+                if secret_count:
+                    logger.warning(f"Secret material detected and redacted in {path}.")
+                    stats["secrets_found"] += secret_count
+                    stats["files_with_secrets"] += 1
+                    stats["secrets_redacted"] += secret_count
+
+                parsed_file = result["parsed_file"]
+                chunks = result["chunks"]
                 stats["files_parsed"] += 1
-                
-                # Chunking — tag every chunk with user_id
-                chunks = self._chunk_parsed_file(parsed_file, repo, user_id, is_public)
                 all_chunks.extend(chunks)
-                
+
                 # Graph Extraction (Static)
                 if self.graph_enabled:
+                    await self._emit_progress(progress_cb, "graph_building", f"Extracting graph edges for {path}")
                     file_id = f"{repo}::{path}"
-                    self.neo4j.merge_node("File", file_id, {
+                    self.neo4j.merge_tenant_node("File", file_id, {
                         "path": path, "repo": repo, "language": parsed_file.language,
-                        "user_id": user_id, "is_public": is_public,
-                    })
-                    self.neo4j.merge_relationship("Repository", repo, "File", file_id, "CONTAINS")
-                    
+                    }, user_id, is_public)
+                    self.neo4j.merge_tenant_relationship("Repository", repo, "File", file_id, "CONTAINS", user_id, is_public)
+
                     edges = []
                     if parsed_file.language == "python":
                         edges = NodeEdgeExtractor.extract_python_edges(path, repo, parsed_file.content)
                     elif parsed_file.language in ("javascript", "typescript", "tsx"):
                         edges = NodeEdgeExtractor.extract_js_ts_edges(path, repo, parsed_file.content)
-                        
+
                     if path.endswith(("package.json", "requirements.txt", "go.mod")):
                         edges.extend(NodeEdgeExtractor.parse_manifest(path, repo, parsed_file.content))
-                        
+
                     for edge in edges:
-                        node_props = {"id": edge["to_id"], "user_id": user_id, "is_public": is_public}
+                        node_props = {}
                         if "properties" in edge:
                             node_props.update(edge["properties"])
-                        self.neo4j.merge_node(edge["to_label"], edge["to_id"], node_props)
-                        
-                        self.neo4j.merge_relationship(
+                        self.neo4j.merge_tenant_node(edge["to_label"], edge["to_id"], node_props, user_id, is_public)
+
+                        self.neo4j.merge_tenant_relationship(
                             edge["from_label"], edge["from_id"],
                             edge["to_label"], edge["to_id"],
-                            edge["rel_type"]
+                            edge["rel_type"],
+                            user_id,
+                            is_public,
                         )
                     stats["graph_edges_created"] += len(edges)
 
             # ── 3. Issues ─────────────────────────────────────────────
             if include_issues:
+                await self._emit_progress(progress_cb, "issues", "Fetching issues")
                 issues = await self.github_client.fetch_issues(owner, repo_name, state="all")
+                issues, issue_secret_stats = self._redact_github_records(issues, ("title", "body"))
+                stats["files_with_secrets"] += issue_secret_stats["records_with_secrets"]
+                stats["secrets_found"] += issue_secret_stats["secrets_redacted"]
+                stats["secrets_redacted"] += issue_secret_stats["secrets_redacted"]
                 
                 if self.graph_enabled:
-                    await self.git_graph.build_issue_graph(issues, repo)
+                    await self._emit_progress(progress_cb, "graph_building", "Building issue graph")
+                    await self.git_graph.build_issue_graph(issues, repo, user_id=user_id, is_public=is_public)
                     
                 for issue in issues:
                     if "pull_request" not in issue:
@@ -188,10 +258,16 @@ class IngestionPipeline:
 
             # ── 4. Pull Requests ──────────────────────────────────────
             if include_prs:
+                await self._emit_progress(progress_cb, "prs", "Fetching pull requests")
                 prs = await self.github_client.fetch_pull_requests(owner, repo_name, state="all")
+                prs, pr_secret_stats = self._redact_github_records(prs, ("title", "body"))
+                stats["files_with_secrets"] += pr_secret_stats["records_with_secrets"]
+                stats["secrets_found"] += pr_secret_stats["secrets_redacted"]
+                stats["secrets_redacted"] += pr_secret_stats["secrets_redacted"]
                 
                 if self.graph_enabled:
-                    await self.git_graph.build_pr_graph(prs, repo)
+                    await self._emit_progress(progress_cb, "graph_building", "Building pull request graph")
+                    await self.git_graph.build_pr_graph(prs, repo, user_id=user_id, is_public=is_public)
                     
                 for pr in prs:
                     try:
@@ -219,13 +295,16 @@ class IngestionPipeline:
                     
             # ── 5. Commits ────────────────────────────────────────────
             if include_commits and self.graph_enabled:
+                await self._emit_progress(progress_cb, "commits", "Fetching commits")
                 # We fetch commits solely for graph history, not for RAG chunking
-                commits = await self.github_client.fetch_commits(owner, repo_name, per_page=100)
-                await self.git_graph.build_commit_graph(commits, repo)
+                commits = await self.github_client.fetch_commits(owner, repo_name, limit=max_commits)
+                await self._emit_progress(progress_cb, "graph_building", "Building commit graph")
+                await self.git_graph.build_commit_graph(commits, repo, user_id=user_id, is_public=is_public)
 
             # ── 6. Embed and Upsert (with user_id in payload) ─────────
             if all_chunks:
-                logger.info(f"Embedding {len(all_chunks)} chunks via Gemini...")
+                logger.info(f"Embedding {len(all_chunks)} chunks locally with FastEmbed...")
+                await self._emit_progress(progress_cb, "embedding", f"Embedding {len(all_chunks)} chunks")
                 
                 texts_to_embed = []
                 for c in all_chunks:
@@ -240,6 +319,7 @@ class IngestionPipeline:
                 
                 # Upsert
                 logger.info("Upserting vectors to Qdrant...")
+                await self._emit_progress(progress_cb, "upserting", "Upserting vectors to Qdrant")
                 self.vector_store.ensure_collection()
                 self.vector_store.upsert_chunks(
                     chunks=all_chunks,
@@ -260,11 +340,13 @@ class IngestionPipeline:
             logger.info(
                 f"Ingestion complete for {repo}. "
                 f"Parsed: {stats['files_parsed']}, Skipped: {stats['files_skipped']}, "
-                f"Secrets: {stats['secrets_found']}, Chunks: {stats['chunks_created']}"
+                f"Secrets redacted: {stats['secrets_redacted']}, Chunks: {stats['chunks_created']}"
             )
+            await self.github_client.aclose()
             return stats
 
         except Exception as e:
+            await self.github_client.aclose()
             logger.error(f"Ingestion failed for {repo}: {e}")
             raise
 
@@ -295,18 +377,110 @@ class IngestionPipeline:
         
         return chunks
 
+    def _process_single_file_content(
+        self,
+        item: dict,
+        content: str,
+        repo: str,
+        user_id: str | None,
+        is_public: bool,
+    ) -> dict:
+        path = item["path"]
+
+        secrets_redacted = count_secret_matches(content)
+        safe_content = redact_text(content) if secrets_redacted else content
+
+        parsed_file = route_file(path, safe_content)
+        chunks = self._chunk_parsed_file(parsed_file, repo, user_id, is_public)
+        if secrets_redacted:
+            for chunk in chunks:
+                chunk.metadata["secrets_redacted"] = secrets_redacted
+                chunk.metadata["security_censored"] = True
+
+        return {
+            "path": path,
+            "secrets_redacted": secrets_redacted,
+            "parsed_file": parsed_file,
+            "chunks": chunks,
+        }
+
+    def _redact_github_records(
+        self,
+        records: list[dict],
+        text_fields: tuple[str, ...],
+    ) -> tuple[list[dict], dict[str, int]]:
+        sanitized_records: list[dict] = []
+        records_with_secrets = 0
+        secrets_redacted = 0
+
+        for record in records:
+            sanitized = dict(record)
+            record_secret_count = 0
+            for field in text_fields:
+                value = sanitized.get(field)
+                if not isinstance(value, str) or not value:
+                    continue
+                field_secret_count = count_secret_matches(value)
+                if field_secret_count:
+                    sanitized[field] = redact_text(value)
+                    record_secret_count += field_secret_count
+
+            if record_secret_count:
+                records_with_secrets += 1
+                secrets_redacted += record_secret_count
+            sanitized_records.append(sanitized)
+
+        return sanitized_records, {
+            "records_with_secrets": records_with_secrets,
+            "secrets_redacted": secrets_redacted,
+        }
+
+    async def _process_files_concurrently(
+        self,
+        fetched_files: list[tuple[dict, str]],
+        repo: str,
+        user_id: str | None,
+        is_public: bool,
+    ) -> list[dict]:
+        semaphore = asyncio.Semaphore(max(1, self.file_processing_concurrency))
+
+        async def _run_one(index: int, item: dict, content: str) -> dict:
+            async with semaphore:
+                result = await asyncio.to_thread(
+                    self._process_single_file_content,
+                    item,
+                    content,
+                    repo,
+                    user_id,
+                    is_public,
+                )
+                result["index"] = index
+                return result
+
+        tasks = [
+            _run_one(index, item, content)
+            for index, (item, content) in enumerate(fetched_files)
+        ]
+        return await asyncio.gather(*tasks)
+
+    async def _emit_progress(
+        self,
+        callback: Callable[[str, str, dict | None], Awaitable[None] | None] | None,
+        stage: str,
+        message: str,
+        meta: dict | None = None,
+    ) -> None:
+        if not callback:
+            return
+
+        result = callback(stage, message, meta)
+        if inspect.isawaitable(result):
+            await result
+
     async def _register_webhook(self, owner: str, repo_name: str):
         from core.config import settings
         if not settings.github_webhook_secret:
              return
-             
-        import httpx
-        url = f"https://api.github.com/repos/{owner}/{repo_name}/hooks"
-        headers = {
-            "Accept": "application/vnd.github.v3+json",
-            "Authorization": self.github_client.headers.get("Authorization", ""),
-            "User-Agent": "Cortex-App"
-        }
         
         backend_url = getattr(settings, "backend_url", None)
         if not backend_url:
@@ -323,11 +497,10 @@ class IngestionPipeline:
             }
         }
         
-        async with httpx.AsyncClient() as client:
-            res = await client.post(url, headers=headers, json=payload)
-            if res.status_code == 201:
-                logger.info(f"Successfully registered webhook for {owner}/{repo_name}")
-            elif res.status_code == 422:
-                logger.info(f"Webhook already exists or invalid payload for {owner}/{repo_name}: {res.text}")
-            else:
-                logger.warning(f"Webhook registration returned {res.status_code}: {res.text}")
+        res = await self.github_client.create_webhook(owner, repo_name, payload)
+        if res.status_code == 201:
+            logger.info(f"Successfully registered webhook for {owner}/{repo_name}")
+        elif res.status_code == 422:
+            logger.info(f"Webhook already exists or invalid payload for {owner}/{repo_name}: {res.text}")
+        else:
+            logger.warning(f"Webhook registration returned {res.status_code}: {res.text}")

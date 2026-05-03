@@ -11,7 +11,7 @@ Unlike standard RAG tools that treat code as flat text, Cortex understands the *
 Cortex operates on a dual-database backbone that separates **Semantic Meaning** from **Structural Fact**.
 
 ### 1. Semantic Anchoring (Qdrant)
-* **High-Dimensional Embeddings**: Chunks are converted into 768-dimensional dense vectors using **Google’s text-embedding-004**.
+* **High-Dimensional Embeddings**: Chunks are converted into 768-dimensional dense vectors locally using **FastEmbed** with `BAAI/bge-base-en-v1.5`.
 * **Privacy-First Stamping**: Every vector payload is hard-stamped with the session's `user_id` and the `repo` identifier to ensure strict row-level isolation and prevent cross-tenant data bleed.
 * **Contextual Discovery**: Vector search is utilized for "conceptual neighborhoods," finding relevant logic even when keywords do not match exactly.
 
@@ -49,7 +49,8 @@ Our ingestion pipeline is engineered for high-performance and absolute security.
 * **RAM-Only Lifecycle**: Repository data is fetched and processed entirely in RAM; code exists as Python variables for the duration of chunking and is instantly garbage-collected, ensuring no proprietary source files are written to the server's disk.
 * **AST Smart Slicer**: Utilizes **Tree-sitter** for structural awareness. We implement a **"150-Line Rule"**: standard functions are embedded fully, while functions exceeding 150 lines are truncated to "Skeletons" (signature + docstring) in the vector space to prevent semantic dilution.
 * **Security Censor**: A pre-processing gatekeeper scans raw text for exposed credentials (AWS keys, tokens) and redacts them prior to database upsertion.
-* **SSE Progress Streaming**: Progress is streamed via Server-Sent Events (SSE) to the frontend, providing real-time status updates on the chunking and embedding process.
+* **SSE Progress Streaming**: Progress is streamed via Server-Sent Events (SSE) to the frontend, with polling fallback for network interruptions.
+* **Development Reload Caveat**: Ingest jobs currently live in memory. For long ingestion runs, start FastAPI without `--reload`; a reload/restart clears active job state and the UI will mark the job as `lost`.
 
 ---
 
@@ -88,7 +89,7 @@ We adhere to a **Zero-Residual Data** philosophy:
 | **Frontend** | Next.js, Three.js, Shiki/Monaco, Tailwind CSS |
 | **Backend** | FastAPI, LangGraph, Tree-sitter |
 | **Databases** | Neo4j (Graph), Qdrant (Vector) |
-| **Inference** | Groq (Llama 3.3), Google GenAI (Embeddings) |
+| **Inference** | Groq (Llama 3.3), Gemini 2.5 Flash (generation), FastEmbed (local embeddings) |
 | **Security** | JWT, HttpOnly Cookies, GitHub OAuth |
 
 ## 📄 License

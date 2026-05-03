@@ -13,14 +13,14 @@ export default function LoginPage() {
 
   // Redirect if already authenticated
   React.useEffect(() => {
-    if (isAuthenticated) router.push("/");
+    if (isAuthenticated) router.push("/repos");
   }, [isAuthenticated, router]);
 
   const handleGuest = async () => {
     setLoading(true);
     await loginAsGuest(guestName || "Guest");
     setLoading(false);
-    router.push("/");
+    router.push("/repos");
   };
 
   return (

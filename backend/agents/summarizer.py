@@ -11,6 +11,7 @@ The snapshot is stored on the Repository node in Neo4j.
 
 from core.config import settings
 from core.logger import get_logger
+from core.tenant import tenant_scoped_id
 from indexing.graph_builder.neo4j_manager import Neo4jManager
 from indexing.qdrant_store import VectorStore
 from indexing.embedder import CortexEmbedder
@@ -27,39 +28,46 @@ async def generate_repo_snapshot(repo: str, user_id: str | None = None) -> str:
     neo4j = Neo4jManager()
     
     # ── 1. Degree centrality: find the most connected files ──────────
+    scoped_repo_id = tenant_scoped_id(repo, user_id)
+
     hub_query = """
     MATCH (f:File {repo: $repo})-[r]-()
+    WHERE f.user_id = $user_id OR f.is_public = true
     WITH f, count(r) AS degree
     ORDER BY degree DESC
     LIMIT 10
     RETURN f.path AS path, f.language AS language, degree
     """
-    hubs = neo4j.run_query(hub_query, {"repo": repo})
+    hubs = neo4j.run_query(hub_query, {"repo": repo, "user_id": user_id})
     
     # ── 2. Entry points: files that are imported most ────────────────
     entry_query = """
     MATCH (importer:File)-[:IMPORTS]->(target:File {repo: $repo})
+    WHERE (importer.user_id = $user_id OR importer.is_public = true)
+      AND (target.user_id = $user_id OR target.is_public = true)
     WITH target, count(importer) AS import_count
     ORDER BY import_count DESC
     LIMIT 5
     RETURN target.path AS path, import_count
     """
-    entry_points = neo4j.run_query(entry_query, {"repo": repo})
+    entry_points = neo4j.run_query(entry_query, {"repo": repo, "user_id": user_id})
     
     # ── 3. Dependency count ──────────────────────────────────────────
     dep_query = """
     MATCH (r:Repository {full_name: $repo})-[:DEPENDS_ON]->(d:Dependency)
+    WHERE r.user_id = $user_id OR r.is_public = true
     RETURN d.name AS name, d.ecosystem AS ecosystem
     LIMIT 20
     """
-    dependencies = neo4j.run_query(dep_query, {"repo": repo})
+    dependencies = neo4j.run_query(dep_query, {"repo": repo, "user_id": user_id})
     
     # ── 4. Basic graph stats ─────────────────────────────────────────
     stats_query = """
-    MATCH (n) WHERE n.repo = $repo OR n.full_name = $repo
+    MATCH (n) WHERE (n.repo = $repo OR n.full_name = $repo)
+      AND (n.user_id = $user_id OR n.is_public = true)
     RETURN labels(n)[0] AS label, count(n) AS count
     """
-    stats = neo4j.run_query(stats_query, {"repo": repo})
+    stats = neo4j.run_query(stats_query, {"repo": repo, "user_id": user_id})
     stats_dict = {s["label"]: s["count"] for s in stats if s["label"]}
     
     # ── 5. Find README content from Qdrant ───────────────────────────
@@ -141,8 +149,8 @@ async def generate_repo_snapshot(repo: str, user_id: str | None = None) -> str:
     # ── 8. Store snapshot on the Repository node ─────────────────────
     try:
         neo4j.run_query(
-            "MATCH (r:Repository {full_name: $repo}) SET r.snapshot = $snapshot",
-            {"repo": repo, "snapshot": snapshot},
+            "MATCH (r:Repository {id: $repo_id}) SET r.snapshot = $snapshot",
+            {"repo_id": scoped_repo_id, "snapshot": snapshot},
         )
         logger.info(f"Stored architectural snapshot for {repo}")
     except Exception as e:
