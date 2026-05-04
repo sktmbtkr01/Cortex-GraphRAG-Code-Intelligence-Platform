@@ -205,3 +205,14 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Cortex local planning / implementation notes
+cortex_*_tracker.md
+cortex_*_fix_plan.md
+cortex_architecture_final_v2.md
+implementation_plan.md
+
+# Cortex scratch verification scripts
+test_ingest.py
+backend/test_*.py
+backend/*_test.py
