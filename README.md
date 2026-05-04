@@ -105,7 +105,7 @@ The agent is instructed to cite file paths, functions, and line numbers when ava
 
 ## Ingestion Pipeline
 
-The ingestion pipeline is optimized for repository-scale processing while preserving tenant isolation.
+The ingestion pipeline is optimized for repository-scale processing and reliable indexing behavior.
 
 1. **Repository metadata check**
    - Validates repository format.
@@ -131,7 +131,7 @@ The ingestion pipeline is optimized for repository-scale processing while preser
 5. **Vector indexing**
    - Generates local dense vectors with FastEmbed.
    - Generates sparse vectors for lexical retrieval.
-   - Upserts tenant-scoped chunks into Qdrant.
+   - Upserts repository-scoped chunks into Qdrant.
 
 6. **Graph indexing**
    - Creates Neo4j nodes for repositories and files.
@@ -144,36 +144,6 @@ The ingestion pipeline is optimized for repository-scale processing while preser
    - Stores the snapshot for fast retrieval from the repository manager UI.
 
 Ingestion progress is tracked through an in-memory job store and exposed through polling-friendly job status endpoints. In local development, restarting the backend clears active in-memory job state.
-
-## Multi-Tenant Isolation
-
-Cortex treats repository data as tenant-scoped by default.
-
-- GitHub OAuth creates a server-side authenticated session.
-- The browser receives only an HttpOnly session cookie.
-- GitHub access tokens remain server-side and are not exposed to frontend JavaScript.
-- Qdrant payloads include `user_id` and `is_public`.
-- Neo4j nodes include `user_id`, `raw_id`, and `is_public`.
-- Private repository node IDs are tenant-scoped to avoid collisions across users.
-- Retrieval, graph queries, repository listing, and deletion are filtered by the current user.
-
-Public repositories can be marked as public so other authorized contexts may search them without crossing private tenant boundaries.
-
-## Security Model
-
-Cortex currently implements:
-
-- GitHub OAuth login.
-- HttpOnly JWT session cookie.
-- Server-side GitHub token session storage.
-- Secret redaction before indexing.
-- Tenant-scoped vector and graph writes.
-- Tenant-scoped reads for RAG, graph exploration, repository listing, and deletion.
-- Repository deletion across both Qdrant and Neo4j.
-- OAuth callback hardening against duplicate submissions.
-- GitHub client retry and timeout configuration.
-
-The project should still be treated as an MVP, not a hardened enterprise deployment. Production use should add durable job queues, persistent session storage, stronger audit logging, background worker isolation, and stricter operational controls.
 
 ## Backend API Surface
 
@@ -328,26 +298,6 @@ For end-to-end validation, use a small repository first:
 7. Ask a repository-specific question in the query page.
 8. Open the graph page and confirm graph data loads.
 9. Delete the repository and confirm both vector and graph data are removed.
-
-## Operational Notes
-
-- FastEmbed downloads the embedding model on first use unless `EMBEDDING_LOCAL_FILES_ONLY=true`.
-- Keep `EMBEDDING_DIMENSIONS=768` when using `BAAI/bge-base-en-v1.5`; changing dimensions requires recreating the Qdrant collection.
-- The ingestion job store is currently in memory. Backend restarts can mark active jobs as lost.
-- Neo4j and Qdrant are source-of-truth stores for indexed intelligence data. They can be cleared during development, but production deployments should use controlled deletion paths.
-- Large repositories should be tested gradually. Tune GitHub fetch and file processing concurrency based on GitHub rate limits and host capacity.
-
-## Roadmap
-
-Near-term priorities:
-
-- Durable ingestion job queue and worker process separation.
-- Better graph exploration UX and richer graph filtering.
-- Improved source citation UI.
-- Stronger evaluation suite for RAG answer grounding.
-- Persistent session/token store for production deployment.
-- Expanded static analysis for additional languages.
-- More precise GraphRAG retrieval that combines vector hits with neighboring graph expansion.
 
 ## License
 
