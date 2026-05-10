@@ -5,6 +5,7 @@ import { useSearchParams } from "next/navigation";
 import { Code2, FileText, GitBranch, LoaderCircle, MessageSquare, Route, Search, Send, Sparkles } from "lucide-react";
 import MarkdownMessage from "@/components/MarkdownMessage";
 import { useAuth } from "@/context/AuthContext";
+import { ShiningText } from "@/components/ui/shining-text";
 
 type SourceChunk = {
   text: string;
@@ -235,8 +236,7 @@ export default function QueryPage() {
     <section className="workspace query-workspace">
       <header className="query-header">
         <div>
-          <p>Query</p>
-          <h1>Code Intelligence Workspace</h1>
+          <h1>Intelligence</h1>
         </div>
         <div className="query-scope">
           <GitBranch size={16} />
@@ -323,7 +323,7 @@ export default function QueryPage() {
                   <span>Cortex</span>
                 </div>
                 <p className="loading-row">
-                  <LoaderCircle className="spinner" size={16} /> Analyzing retrieved context...
+                  <LoaderCircle className="spinner" size={16} /> <ShiningText text="Cortex is thinking..." />
                 </p>
               </article>
             )}

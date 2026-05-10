@@ -3,6 +3,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense } from "react";
+import NeuralLoader from "@/components/NeuralLoader";
 
 function CallbackHandler() {
   const router = useRouter();
@@ -30,31 +31,23 @@ function CallbackHandler() {
           setTimeout(() => router.push("/repos"), 500);
         } else {
           setStatus("Login failed. Please try again.");
-          setTimeout(() => router.push("/login"), 2000);
+          setTimeout(() => router.push("/"), 2000);
         }
       });
     } else {
-      setStatus("Auth context not ready. Redirecting to login...");
-      setTimeout(() => router.push("/login"), 1000);
+      setStatus("Auth context not ready. Redirecting...");
+      setTimeout(() => router.push("/"), 1000);
     }
   }, [searchParams, router]);
 
   return (
-    <section className="login-page">
-      <div className="login-container" style={{ textAlign: "center" }}>
-        <span className="brand-mark" style={{ width: 56, height: 56, fontSize: 22, margin: "0 auto" }}>Cx</span>
-        <h2 style={{ marginTop: 24 }}>{status}</h2>
-        <div style={{ marginTop: 24 }}>
-          <span className="spinner" style={{ display: "inline-block", width: 24, height: 24, border: "2px solid var(--line)", borderTopColor: "var(--accent)", borderRadius: "50%" }} />
-        </div>
-      </div>
-    </section>
+    <NeuralLoader status={status} detail="Securing your GitHub session" />
   );
 }
 
 export default function AuthCallbackPage() {
   return (
-    <Suspense fallback={<div style={{ padding: 44, color: "var(--muted)" }}>Loading...</div>}>
+    <Suspense fallback={<NeuralLoader status="Preparing Cortex" />}>
       <CallbackHandler />
     </Suspense>
   );

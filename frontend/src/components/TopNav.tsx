@@ -2,11 +2,11 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Database, MessageSquare, Share2, LogOut, GitBranch as GitHubIcon } from "lucide-react";
+import { Brain, Database, MessageSquare, Share2, LogOut, GitBranch as GitHubIcon } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 
 const NAV_ITEMS = [
-  { href: "/repos", label: "Dashboard", icon: Database },
+  { href: "/repos", label: "Repo Manager", icon: Database },
   { href: "/query", label: "Query", icon: MessageSquare },
   { href: "/graph", label: "Knowledge Graph", icon: Share2 },
 ];
@@ -24,7 +24,9 @@ export default function TopNav() {
     <header className="top-nav-wrap">
       <nav className="top-nav glass" aria-label="Primary navigation">
         <Link href="/repos" className="brand" aria-label="Cortex dashboard">
-          <span className="brand-mark">Cx</span>
+          <span className="app-brand-mark" aria-hidden="true">
+            <Brain size={25} strokeWidth={1.55} />
+          </span>
           <span>
             <strong>Cortex</strong>
             <small>Code Intelligence</small>

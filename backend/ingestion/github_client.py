@@ -77,6 +77,7 @@ class GitHubClient:
         return httpx.AsyncClient(
             timeout=self._timeout(),
             limits=self._limits(concurrency),
+            follow_redirects=True,
         )
 
     async def __aenter__(self) -> "GitHubClient":

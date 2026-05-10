@@ -36,41 +36,44 @@ export default function Drawer({ open, title, onClose, children }: DrawerProps) 
         aria-modal="true"
         style={{
           position: "absolute",
-          right: 0,
-          top: 0,
-          height: "100%",
-          width: "min(620px, 100vw)",
-          borderLeft: "1px solid var(--line)",
-          background: "rgba(24, 28, 22, 0.94)",
-          backdropFilter: "blur(14px)",
-          transform: open ? "translateX(0)" : "translateX(104%)",
-          transition: "transform 220ms ease",
+          right: 18,
+          top: 122,
+          bottom: 18,
+          height: "calc(100% - 140px)",
+          width: "min(660px, calc(100vw - 36px))",
+          border: "1px solid rgba(255,255,255,0.1)",
+          borderRadius: 28,
+          background: "rgba(8, 12, 10, 0.82)",
+          backdropFilter: "blur(24px)",
+          transform: open ? "translateX(0)" : "translateX(108%)",
+          transition: "transform 260ms cubic-bezier(.2,.8,.2,1)",
           display: "grid",
           gridTemplateRows: "auto 1fr",
-          boxShadow: "-16px 0 48px rgba(0,0,0,0.35)",
+          boxShadow: "-20px 0 70px rgba(0,0,0,0.42)",
+          overflow: "hidden",
         }}
       >
         <header
           style={{
-            padding: "14px 16px",
-            borderBottom: "1px solid var(--line)",
+            padding: "18px 20px",
+            borderBottom: "1px solid rgba(255,255,255,0.08)",
             display: "flex",
             alignItems: "center",
             justifyContent: "space-between",
             gap: 12,
           }}
         >
-          <strong style={{ fontSize: 15 }}>{title || "Details"}</strong>
+          <strong style={{ fontSize: 15, letterSpacing: 0 }}>{title || "Details"}</strong>
           <button
             type="button"
             onClick={onClose}
             style={{
               minHeight: 30,
               padding: "0 8px",
-              background: "transparent",
+              background: "rgba(255,255,255,0.04)",
               color: "var(--muted)",
-              border: "1px solid var(--line)",
-              borderRadius: 7,
+              border: "1px solid rgba(255,255,255,0.1)",
+              borderRadius: 999,
             }}
             aria-label="Close drawer"
           >
@@ -78,7 +81,7 @@ export default function Drawer({ open, title, onClose, children }: DrawerProps) 
           </button>
         </header>
 
-        <div style={{ overflow: "auto", padding: "16px 18px" }}>{children}</div>
+        <div style={{ overflow: "auto", padding: "18px 20px" }}>{children}</div>
       </aside>
     </div>
   );

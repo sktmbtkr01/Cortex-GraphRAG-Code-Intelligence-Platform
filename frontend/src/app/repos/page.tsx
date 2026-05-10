@@ -7,7 +7,8 @@ import MarkdownMessage from "@/components/MarkdownMessage";
 import HealthCheckReport from "@/components/HealthCheckReport";
 import RepoCard from "@/components/RepoCard";
 import Drawer from "@/components/Drawer";
-import IngestToasts from "@/components/IngestToasts";
+import GlobalBrainBar from "@/components/GlobalBrainBar";
+import SearchableSelect from "@/components/ui/searchable-select";
 import { openIngestEventStream, type IngestStreamEvent } from "@/app/utils/sse";
 
 interface Repo {
@@ -31,6 +32,34 @@ interface GitHubRepo {
 interface GitHubBranch {
   name: string;
   commit_sha?: string | null;
+}
+
+function simplifyIngestStage(stage: string, message = "") {
+  const text = `${stage} ${message}`.toLowerCase();
+  if (text.includes("chunk")) return "chunking";
+  if (text.includes("embed")) return "embedding";
+  if (text.includes("graph") || text.includes("neo4j")) return "building graph";
+  if (text.includes("snapshot")) return "snapshot";
+  if (text.includes("fetch") || text.includes("github")) return "fetching files";
+  if (text.includes("queue") || text.includes("start")) return "queued";
+  if (text.includes("done") || text.includes("complete")) return "complete";
+  return stage.replaceAll("_", " ");
+}
+
+function simplifyIngestMessage(message: string) {
+  return message
+    .replace(/\b\d+\s*\/\s*\d+\b/g, "")
+    .replace(/\b\d+%\b/g, "")
+    .replace(/\s{2,}/g, " ")
+    .replace(/\s+([,.])/g, "$1")
+    .trim();
+}
+
+function upsertIngestEvent(
+  events: Array<{ id: string; stage: string; message: string; state: "running" | "done" | "error" }>,
+  next: { id: string; stage: string; message: string; state: "running" | "done" | "error" },
+) {
+  return [...events.filter((item) => item.stage !== next.stage), next];
 }
 
 export default function ReposPage() {
@@ -67,6 +96,25 @@ export default function ReposPage() {
       return acc;
     }, {});
   }, [myRepos]);
+
+  const repoOptions = React.useMemo(() => {
+    return myRepos.map((repo) => ({
+      value: repo.full_name,
+      label: repo.full_name,
+      meta: `${repo.private ? "Private" : "Public"}${repo.language ? ` · ${repo.language}` : ""} · ${repo.stars} stars`,
+    }));
+  }, [myRepos]);
+
+  const branchOptions = React.useMemo(() => {
+    if (branches.length === 0) {
+      return [{ value: selectedBranch || "main", label: selectedBranch || "main" }];
+    }
+    return branches.map((branch) => ({
+      value: branch.name,
+      label: branch.name,
+      meta: branch.commit_sha ? branch.commit_sha.slice(0, 7) : undefined,
+    }));
+  }, [branches, selectedBranch]);
 
   const fetchRepos = async () => {
     try {
@@ -157,20 +205,20 @@ export default function ReposPage() {
   }, [selectedMyRepo, myRepoMetaByName, API_URL, authHeaders]);
 
   const pushToast = (event: IngestStreamEvent) => {
+    const stage = simplifyIngestStage(event.stage, event.message);
     const toast = {
-      id: `${event.stage}-${event.state}`,
-      stage: event.stage,
-      message: event.message,
+      id: `${stage}-${event.state}`,
+      stage,
+      message: simplifyIngestMessage(event.message),
       state: event.state === "lost" ? "error" as const : event.state === "queued" ? "running" as const : event.state,
     };
 
     setToastEvents((prev) => {
       if (toast.state === "done" || toast.state === "error") {
-        return [toast];
+        return upsertIngestEvent(prev, toast);
       }
 
-      const next = [...prev.filter((item) => item.stage !== toast.stage), toast];
-      return next.filter((item) => item.state === "running").slice(-4);
+      return upsertIngestEvent(prev, toast).slice(-6);
     });
   };
 
@@ -190,6 +238,21 @@ export default function ReposPage() {
       clearInterval(ingestPollRef.current);
       ingestPollRef.current = null;
     }
+  };
+
+  const pushIngestConsoleEvent = (
+    stage: string,
+    message: string,
+    state: "running" | "done" | "error" = "running",
+  ) => {
+    setToastEvents((events) =>
+      upsertIngestEvent(events, {
+        id: `${stage}-${Date.now()}`,
+        stage: simplifyIngestStage(stage, message),
+        message: simplifyIngestMessage(message),
+        state,
+      }),
+    );
   };
 
   const handleIngestEvent = (event: IngestStreamEvent, repoFallback: string) => {
@@ -383,7 +446,9 @@ export default function ReposPage() {
       });
       const data = await res.json();
       if (!res.ok) {
-        alert("Error: " + data.detail);
+        const message = data.detail || "Failed to check for repository updates.";
+        setIngestStatus(message);
+        pushIngestConsoleEvent("update failed", message, "error");
         setLoading(false);
         ingestActiveRef.current = false;
         return;
@@ -391,6 +456,7 @@ export default function ReposPage() {
 
       if (data.status === "up_to_date") {
         setIngestStatus(`${repoName} @ ${branchName} is already up to date.`);
+        setToastEvents([]);
         setLoading(false);
         ingestActiveRef.current = false;
         void fetchRepos();
@@ -452,66 +518,84 @@ export default function ReposPage() {
     }
   };
 
+  const visibleIngestEvents = toastEvents.slice(-6);
+
   return (
-    <section className="workspace">
-      <header className="page-header">
-        <p>Repositories</p>
+    <section className="workspace repos-workspace">
+      <header className="page-header repo-page-header">
         <h1>Repository Manager</h1>
       </header>
 
-      <div className="panel-grid" style={{ marginTop: 24 }}>
-        <article className="panel">
+      <GlobalBrainBar />
+
+      <div className="repo-manager-grid">
+        <article className="panel repo-ingest-panel">
           <h2>Add Repository</h2>
 
-          <div style={{ display: "inline-flex", gap: 8, marginTop: 12, marginBottom: 16 }}>
+          <div className="repo-source-pill">
             <button type="button" disabled={loading}>
               <GitHubIcon size={14} /> My Repositories
             </button>
           </div>
 
-          <form className="form-row" onSubmit={handleIngest} style={{ padding: 0, border: "none", flexDirection: "column", alignItems: "stretch" }}>
-            <select
+          <form className="repo-ingest-form" onSubmit={handleIngest}>
+            <SearchableSelect
+              label="Repository"
               value={selectedMyRepo}
-              onChange={(e) => setSelectedMyRepo(e.target.value)}
-              aria-label="My repositories"
+              onChange={setSelectedMyRepo}
+              options={repoOptions}
+              placeholder="Select repository"
+              emptyText="No repositories found."
               disabled={loading || myRepos.length === 0}
-            >
-              {myRepos.length === 0 ? (
-                <option value="">No GitHub repos available</option>
-              ) : (
-                myRepos.map((repo) => (
-                  <option key={repo.full_name} value={repo.full_name}>
-                    {repo.full_name} {repo.private ? "(private)" : "(public)"}
-                  </option>
-                ))
-              )}
-            </select>
+            />
 
-            <select
+            <SearchableSelect
+              label="Branch"
               value={selectedBranch}
-              onChange={(e) => setSelectedBranch(e.target.value)}
-              aria-label="Repository branch"
+              onChange={setSelectedBranch}
+              options={branchOptions}
+              placeholder="Select branch"
+              emptyText="No branches found."
               disabled={loading}
-            >
-              {branches.length === 0 ? (
-                <option value={selectedBranch || "main"}>{selectedBranch || "main"}</option>
-              ) : (
-                branches.map((branch) => (
-                  <option key={branch.name} value={branch.name}>
-                    {branch.name}
-                  </option>
-                ))
-              )}
-            </select>
+            />
 
             <button type="submit" disabled={loading || !selectedMyRepo}>
               {loading ? <RefreshCw className="spinner" size={16} /> : "Ingest"}
             </button>
           </form>
 
-          {ingestStatus && (
-            <div style={{ marginTop: 16, padding: 12, background: "var(--panel-strong)", borderRadius: 6, fontSize: 14 }}>
-              {ingestStatus}
+          {(ingestStatus || visibleIngestEvents.length > 0 || loading) && (
+            <div className="ingest-console">
+              <div className="ingest-animation" aria-hidden="true">
+                <span />
+                <span />
+                <span />
+              </div>
+              <div className="ingest-console-header">
+                <strong>{loading ? "Ingestion running" : "Ingestion status"}</strong>
+                {ingestStatus && <small>{simplifyIngestMessage(ingestStatus)}</small>}
+              </div>
+              <div className="ingest-stage-list">
+                {visibleIngestEvents.length > 0 ? (
+                  visibleIngestEvents.map((event) => (
+                    <div className={`ingest-stage ${event.state}`} key={event.id}>
+                      <span />
+                      <div>
+                        <strong>{event.stage}</strong>
+                        <p>{event.message || event.stage}</p>
+                      </div>
+                    </div>
+                  ))
+                ) : loading ? (
+                  <div className="ingest-stage running">
+                    <span />
+                    <div>
+                      <strong>queued</strong>
+                      <p>Preparing repository ingest.</p>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
             </div>
           )}
           {myReposWarning && (
@@ -519,7 +603,7 @@ export default function ReposPage() {
           )}
         </article>
 
-        <article className="panel">
+        <article className="panel repo-indexed-panel">
           <h2>Indexed Repos</h2>
           {repoLoadWarning && (
             <p style={{ color: "var(--warn)", fontSize: 12, marginBottom: 10 }}>{repoLoadWarning}</p>
@@ -527,7 +611,7 @@ export default function ReposPage() {
           {repos.length === 0 ? (
             <div className="empty-state">No repositories indexed yet.</div>
           ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <div className="repo-card-stack">
               {repos.map(r => (
                 <RepoCard
                   key={`${r.repo}@${r.branch}`}
@@ -548,8 +632,6 @@ export default function ReposPage() {
           )}
         </article>
       </div>
-
-      <IngestToasts events={toastEvents} />
 
       <Drawer open={drawerOpen} onClose={() => setDrawerOpen(false)} title={drawerTitle || "Details"}>
         <article>

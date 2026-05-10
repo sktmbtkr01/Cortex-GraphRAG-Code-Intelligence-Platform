@@ -112,6 +112,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       // Still clear local state.
     }
     setState({ user: null, isLoading: false, isAuthenticated: false });
+    if (typeof window !== "undefined") {
+      window.location.href = "/";
+    }
   }, []);
 
   const authHeaders = useCallback((): HeadersInit => {

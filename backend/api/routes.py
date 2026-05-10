@@ -1214,13 +1214,13 @@ async def _run_repo_health_check(
                 repo=full_name,
                 branch=branch_name,
                 report=cached_report,
-                signals={
+                signals=_json_safe_graph_value({
                     "repo": full_name,
                     "branch": branch_name,
                     "commit_sha": commit_sha,
                     "cache": "hit",
                     "health_checked_at": repo_record.get("health_checked_at"),
-                },
+                }),
             )
 
         node_rows = neo4j.run_query(

@@ -2,8 +2,9 @@
 
 import React, { useRef, useEffect, useState, useCallback, useMemo } from "react";
 import dynamic from "next/dynamic";
-import { Search } from "lucide-react";
+import { Crosshair, Info, LoaderCircle, Search } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
+import SearchableSelect from "@/components/ui/searchable-select";
 
 // Dynamically import ForceGraph3D to prevent SSR issues
 const ForceGraph3D = dynamic(() => import("react-force-graph-3d"), { ssr: false });
@@ -48,6 +49,8 @@ export default function GraphViewer() {
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
   const [allRepos, setAllRepos] = useState<Array<{ repo: string; branch: string }>>([]);
   const fgRef = useRef<any>(null);
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const [canvasSize, setCanvasSize] = useState({ width: 1200, height: 720 });
 
   useEffect(() => {
     // Fetch repos for the dropdown
@@ -82,6 +85,16 @@ export default function GraphViewer() {
     );
     return NODE_LEGEND.filter((item) => presentTypes.has(item.type));
   }, [graphData.nodes]);
+
+  const repoOptions = useMemo(
+    () =>
+      allRepos.map((repo) => ({
+        value: `${repo.repo}@${repo.branch}`,
+        label: repo.repo,
+        meta: repo.branch,
+      })),
+    [allRepos],
+  );
 
   const fetchGraphData = useCallback(async () => {
     setLoading(true);
@@ -150,77 +163,102 @@ export default function GraphViewer() {
     fetchGraphData();
   }, [fetchGraphData]);
 
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const updateSize = () => {
+      const rect = canvas.getBoundingClientRect();
+      setCanvasSize({
+        width: Math.max(320, Math.floor(rect.width)),
+        height: Math.max(360, Math.floor(rect.height)),
+      });
+    };
+
+    updateSize();
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!fgRef.current || graphData.nodes.length === 0) return;
+    const timeout = window.setTimeout(() => {
+      fgRef.current?.zoomToFit?.(700, 120);
+    }, 450);
+    return () => window.clearTimeout(timeout);
+  }, [graphData.nodes.length, graphData.links.length, canvasSize.width, canvasSize.height]);
+
   const handleNodeClick = useCallback((node: any) => {
     setSelectedNode(node);
     if (fgRef.current) {
       // Aim at node from outside it
-      const distance = 40;
-      const distRatio = 1 + distance / Math.hypot(node.x, node.y, node.z);
+      const distance = 150;
+      const nodeDistance = Math.max(1, Math.hypot(node.x, node.y, node.z));
+      const distRatio = 1 + distance / nodeDistance;
       fgRef.current.cameraPosition(
         { x: node.x * distRatio, y: node.y * distRatio, z: node.z * distRatio },
         node, 
-        3000
+        1800
       );
     }
   }, []);
 
   return (
-    <div className="graph-shell" style={{ position: "relative", width: "100%", height: "100%" }}>
-      {/* Absolute Header Overlay */}
-      <div style={{ position: "absolute", top: 16, left: 16, zIndex: 10, display: "flex", gap: 12 }}>
-        <select value={repoKey} onChange={(e) => setRepoKey(e.target.value)} style={{ padding: "8px 12px", borderRadius: 4 }}>
-          <option value="">Select a repository</option>
-          {allRepos.map((r) => (
-            <option key={`${r.repo}@${r.branch}`} value={`${r.repo}@${r.branch}`}>
-              {r.repo} @ {r.branch}
-            </option>
-          ))}
-        </select>
-        <div style={{ display: "flex", gap: 8, background: "#12150f", padding: "4px 8px", borderRadius: 4, border: "1px solid var(--line)", alignItems: "center" }}>
-          <Search size={16} color="var(--muted)" />
+    <div className="graph-shell">
+      <section className="graph-stage" aria-label="Knowledge graph explorer">
+        <div className="graph-controls">
+          <div className="graph-repo-select">
+            <SearchableSelect
+              label="Repository"
+              value={repoKey}
+              options={repoOptions}
+              placeholder="Select a repository"
+              emptyText="No indexed repositories"
+              onChange={setRepoKey}
+            />
+          </div>
+          <label className="graph-search">
+          <Search size={17} />
           <input 
             type="text" 
             placeholder="Search center node..." 
             value={searchTerm} 
             onChange={(e) => setSearchTerm(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && fetchGraphData()}
-            style={{ border: "none", background: "transparent", outline: "none" }}
           />
+          </label>
         </div>
-      </div>
 
       <div
+        className="graph-legend"
         aria-label="Graph legend"
-        style={{
-          position: "absolute",
-          top: 16,
-          right: 336,
-          zIndex: 10,
-          display: "grid",
-          gap: 7,
-          minWidth: 170,
-          padding: "10px 12px",
-          border: "1px solid var(--line)",
-          background: "rgba(18, 21, 15, 0.86)",
-          backdropFilter: "blur(10px)",
-        }}
       >
-        <strong style={{ fontSize: 12, color: "var(--accent-strong)" }}>Node Legend</strong>
-        {visibleLegend.map((item) => (
-          <span key={item.type} style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--muted)" }}>
-            <span style={{ width: 9, height: 9, borderRadius: "50%", background: item.color, border: "1px solid rgba(255,255,255,0.35)" }} />
-            {item.type}
-          </span>
-        ))}
+        <strong>Node Legend</strong>
+        <div>
+          {visibleLegend.map((item) => (
+            <span key={item.type}>
+              <span style={{ background: item.color }} />
+              {item.type}
+            </span>
+          ))}
+        </div>
       </div>
       
       {/* 3D Force Graph */}
-      <div className="graph-canvas" style={{ flexGrow: 1, backgroundColor: "var(--background)" }}>
-        {loading && <div style={{ position: "absolute", zIndex: 10, color: "var(--accent)" }}>Calculating Physics...</div>}
-        {error && <div style={{ position: "absolute", zIndex: 10, top: 64, left: 16, color: "var(--danger, #ff6b6b)", background: "var(--panel)", border: "1px solid var(--line)", padding: 12, maxWidth: 420 }}>{error}</div>}
+      <div className="graph-canvas" ref={canvasRef}>
+        {loading && (
+          <div className="graph-status">
+            <LoaderCircle size={16} className="spin" />
+            Calculating physics...
+          </div>
+        )}
+        {error && <div className="graph-error">{error}</div>}
         <ForceGraph3D
           ref={fgRef}
           graphData={graphData}
+          width={canvasSize.width}
+          height={canvasSize.height}
           nodeLabel="name"
           nodeColor="color"
           nodeVal="val"
@@ -237,32 +275,38 @@ export default function GraphViewer() {
           }}
           linkCurvature={0.2}
           onNodeClick={handleNodeClick}
-          backgroundColor="#10120f"
+          backgroundColor="#050806"
         />
       </div>
+      </section>
 
       {/* Property Panel */}
-      <aside className="detail-panel" style={{ width: 340, overflowY: "auto", background: "var(--panel)" }}>
+      <aside className="detail-panel">
         {selectedNode ? (
-          <div>
-            <h2 style={{ fontSize: 18, color: selectedNode.color || "var(--foreground)" }}>{selectedNode.type}</h2>
-            <p style={{ color: "var(--muted)", margin: "8px 0 24px", wordBreak: "break-all" }}>{selectedNode.id}</p>
+          <div className="graph-node-details">
+            <span className="graph-node-kicker">
+              <Info size={15} />
+              Selected Node
+            </span>
+            <h2 style={{ color: selectedNode.color || "var(--foreground)" }}>{selectedNode.type}</h2>
+            <p>{selectedNode.id}</p>
             
-            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              {Object.entries(selectedNode.properties).map(([key, value]) => (
-                <div key={key}>
-                  <strong style={{ display: "block", fontSize: 12, textTransform: "uppercase", color: "var(--muted)" }}>{key}</strong>
-                  <span style={{ fontSize: 14 }}>{String(value)}</span>
+            <div className="graph-property-list">
+              {Object.entries(selectedNode.properties || {}).map(([key, value]) => (
+                <div className="graph-property" key={key}>
+                  <strong>{key}</strong>
+                  <span>{String(value)}</span>
                 </div>
               ))}
             </div>
             
             <button 
-              style={{ marginTop: 24, width: "100%", padding: "8px" }}
+              className="graph-center-button"
               onClick={() => {
                 setSearchTerm(selectedNode.name || selectedNode.id);
               }}
             >
+              <Crosshair size={16} />
               Set as Center Node
             </button>
           </div>
