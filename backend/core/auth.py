@@ -4,7 +4,7 @@ Cortex Authentication & Authorization Module.
 Provides:
 - JWT token creation/validation for session management
 - FastAPI dependency for extracting authenticated user from requests
-- Support for GitHub OAuth users and guest users
+- Support for GitHub OAuth users
 - user_id extraction for row-level tenant isolation
 """
 
@@ -76,9 +76,9 @@ def _get_jwt_secret() -> str:
 
 class AuthenticatedUser(BaseModel):
     """Represents the currently authenticated user for request-scoped isolation."""
-    user_id: str                    # Unique identifier (e.g., "github:12345" or "guest:uuid")
+    user_id: str                    # Unique identifier, e.g. "github:12345"
     login: str                      # Display name / username
-    provider: str                   # "github" | "guest"
+    provider: str                   # "github"
     avatar_url: str | None = None
     github_token: str | None = None  # Ephemeral, in-memory only — NEVER persisted
 
@@ -146,7 +146,6 @@ async def get_current_user(
     Auth flow:
     1. Read JWT from the `cortex_session` HttpOnly cookie (primary path).
     2. Fall back to `Authorization: Bearer` header for programmatic/test clients.
-    3. In development, fall back to a default guest user with the env PAT.
 
     The ephemeral GitHub token is fetched from the server-side session store
     keyed by user_id — it is NEVER read from the request body/headers.

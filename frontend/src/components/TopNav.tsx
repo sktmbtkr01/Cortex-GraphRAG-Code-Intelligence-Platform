@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Database, MessageSquare, Share2, LogOut, User as UserIcon, GitBranch as GitHubIcon } from "lucide-react";
+import { Database, MessageSquare, Share2, LogOut, GitBranch as GitHubIcon } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 
 const NAV_ITEMS = [
@@ -48,18 +48,14 @@ export default function TopNav() {
 
         <div className="top-nav-user">
           <div className="top-nav-user-meta" title={user?.login || "Anonymous"}>
-            {user?.provider === "github" ? (
-              user?.avatar_url ? (
-                <img src={user.avatar_url} alt={user.login} className="top-nav-avatar" />
-              ) : (
-                <GitHubIcon size={16} color="var(--accent)" />
-              )
+            {user?.avatar_url ? (
+              <img src={user.avatar_url} alt={user.login} className="top-nav-avatar" />
             ) : (
-              <UserIcon size={16} color="var(--muted)" />
+              <GitHubIcon size={16} color="var(--accent)" />
             )}
             <div>
               <strong>{user?.login || "Anonymous"}</strong>
-              <small>{user?.provider === "github" ? "GitHub" : "Guest"}</small>
+              <small>GitHub</small>
             </div>
           </div>
 

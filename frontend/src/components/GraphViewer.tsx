@@ -8,6 +8,18 @@ import { useAuth } from "@/context/AuthContext";
 // Dynamically import ForceGraph3D to prevent SSR issues
 const ForceGraph3D = dynamic(() => import("react-force-graph-3d"), { ssr: false });
 
+const NODE_LEGEND = [
+  { type: "Repository", color: "#ffffff" },
+  { type: "File", color: "#4a90e2" },
+  { type: "Function", color: "#77c86b" },
+  { type: "Class", color: "#b872ff" },
+  { type: "Dependency", color: "#e2d14a" },
+  { type: "Issue", color: "#f3b35f" },
+  { type: "PullRequest", color: "#ff4a4a" },
+  { type: "Contributor", color: "#4afff0" },
+  { type: "Other", color: "#a9ad9e" },
+];
+
 interface GraphNode {
   id: string;
   label: string;
@@ -31,10 +43,10 @@ export default function GraphViewer() {
   const [graphData, setGraphData] = useState<{ nodes: GraphNode[]; links: GraphLink[] }>({ nodes: [], links: [] });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [repo, setRepo] = useState("");
+  const [repoKey, setRepoKey] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
-  const [allRepos, setAllRepos] = useState<string[]>([]);
+  const [allRepos, setAllRepos] = useState<Array<{ repo: string; branch: string }>>([]);
   const fgRef = useRef<any>(null);
 
   useEffect(() => {
@@ -45,9 +57,11 @@ export default function GraphViewer() {
         return res.json();
       })
       .then((data) => {
-        const repoNames = Array.isArray(data) ? data.map((r: any) => r.repo).filter(Boolean) : [];
-        setAllRepos(repoNames);
-        if (repoNames.length > 0) setRepo(repoNames[0]);
+        const repoItems = Array.isArray(data)
+          ? data.map((r: any) => ({ repo: r.repo, branch: r.branch || "main" })).filter((r: any) => r.repo)
+          : [];
+        setAllRepos(repoItems);
+        if (repoItems.length > 0) setRepoKey(`${repoItems[0].repo}@${repoItems[0].branch}`);
       })
       .catch((e) => {
         const message = e instanceof Error ? e.message : "Failed to fetch repos";
@@ -56,16 +70,29 @@ export default function GraphViewer() {
       });
   }, [API_URL, authHeaders]);
 
+  const selectedRepo = useMemo(
+    () => allRepos.find((item) => `${item.repo}@${item.branch}` === repoKey),
+    [allRepos, repoKey],
+  );
+
+  const visibleLegend = useMemo(() => {
+    const knownTypes = new Set(NODE_LEGEND.map((item) => item.type));
+    const presentTypes = new Set(
+      graphData.nodes.map((node) => (knownTypes.has(node.type) ? node.type : "Other")),
+    );
+    return NODE_LEGEND.filter((item) => presentTypes.has(item.type));
+  }, [graphData.nodes]);
+
   const fetchGraphData = useCallback(async () => {
     setLoading(true);
     setError("");
     // Phase 8.4: Single-repo visual constraint — repo is required
-    if (!repo || repo === "all") {
+    if (!selectedRepo) {
       setGraphData({ nodes: [], links: [] });
       setLoading(false);
       return;
     }
-    let url = `${API_URL}/api/v1/graph/explore?repo=${encodeURIComponent(repo)}&depth=2`;
+    let url = `${API_URL}/api/v1/graph/explore?repo=${encodeURIComponent(selectedRepo.repo)}&branch=${encodeURIComponent(selectedRepo.branch)}&depth=2`;
     if (searchTerm) url += `&center=${encodeURIComponent(searchTerm)}`;
 
     try {
@@ -117,7 +144,7 @@ export default function GraphViewer() {
     } finally {
       setLoading(false);
     }
-  }, [API_URL, authHeaders, repo, searchTerm]);
+  }, [API_URL, authHeaders, selectedRepo, searchTerm]);
 
   useEffect(() => {
     fetchGraphData();
@@ -141,9 +168,13 @@ export default function GraphViewer() {
     <div className="graph-shell" style={{ position: "relative", width: "100%", height: "100%" }}>
       {/* Absolute Header Overlay */}
       <div style={{ position: "absolute", top: 16, left: 16, zIndex: 10, display: "flex", gap: 12 }}>
-        <select value={repo} onChange={(e) => setRepo(e.target.value)} style={{ padding: "8px 12px", borderRadius: 4 }}>
+        <select value={repoKey} onChange={(e) => setRepoKey(e.target.value)} style={{ padding: "8px 12px", borderRadius: 4 }}>
           <option value="">Select a repository</option>
-          {allRepos.map((r) => <option key={r} value={r}>{r}</option>)}
+          {allRepos.map((r) => (
+            <option key={`${r.repo}@${r.branch}`} value={`${r.repo}@${r.branch}`}>
+              {r.repo} @ {r.branch}
+            </option>
+          ))}
         </select>
         <div style={{ display: "flex", gap: 8, background: "#12150f", padding: "4px 8px", borderRadius: 4, border: "1px solid var(--line)", alignItems: "center" }}>
           <Search size={16} color="var(--muted)" />
@@ -156,6 +187,31 @@ export default function GraphViewer() {
             style={{ border: "none", background: "transparent", outline: "none" }}
           />
         </div>
+      </div>
+
+      <div
+        aria-label="Graph legend"
+        style={{
+          position: "absolute",
+          top: 16,
+          right: 336,
+          zIndex: 10,
+          display: "grid",
+          gap: 7,
+          minWidth: 170,
+          padding: "10px 12px",
+          border: "1px solid var(--line)",
+          background: "rgba(18, 21, 15, 0.86)",
+          backdropFilter: "blur(10px)",
+        }}
+      >
+        <strong style={{ fontSize: 12, color: "var(--accent-strong)" }}>Node Legend</strong>
+        {visibleLegend.map((item) => (
+          <span key={item.type} style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--muted)" }}>
+            <span style={{ width: 9, height: 9, borderRadius: "50%", background: item.color, border: "1px solid rgba(255,255,255,0.35)" }} />
+            {item.type}
+          </span>
+        ))}
       </div>
       
       {/* 3D Force Graph */}

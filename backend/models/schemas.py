@@ -48,6 +48,9 @@ class Chunk:
     # Multi-tenant isolation (Phase 8)
     user_id: str | None = None
     is_public: bool = False
+    branch: str = "main"
+    commit_sha: str | None = None
+    ingest_run_id: str | None = None
 
     metadata: dict = field(default_factory=dict)
 
@@ -82,11 +85,15 @@ class IngestJobResponse(BaseModel):
     status: str
     repo: str
     message: str
+    branch: str | None = None
+    previous_commit_sha: str | None = None
+    latest_commit_sha: str | None = None
 
 
 class QueryRequest(BaseModel):
     query: str
     repo: str | None = None
+    branch: str | None = None
     language: str | None = None
     top_k: int = 7
     history: list[HistoryMessage] | None = None
@@ -96,21 +103,38 @@ class SourceChunk(BaseModel):
     text: str
     source: str
     file_path: str
+    branch: str | None = None
+    commit_sha: str | None = None
     language: str | None = None
     function_name: str | None = None
+    class_name: str | None = None
+    section_title: str | None = None
     start_line: int | None = None
     end_line: int | None = None
     score: float | None = None
     source_type: str
 
 
+class RetrievalTraceStep(BaseModel):
+    step: int
+    kind: str
+    tool: str
+    input: dict = {}
+    summary: str
+
+
 class QueryResponse(BaseModel):
     answer: str
     sources: list[SourceChunk] = []
+    trace: list[RetrievalTraceStep] = []
+    retrieval_mode: str = "semantic"
+    fallback_used: bool = False
 
 
 class RepoStatus(BaseModel):
     repo: str
+    branch: str = "main"
+    commit_sha: str | None = None
     is_private: bool = False
     ingestion_status: str = "ready"
     file_count: int = 0
@@ -152,3 +176,10 @@ class SnapshotResponse(BaseModel):
 class AuditResponse(BaseModel):
     repo: str
     report: str
+
+
+class HealthCheckResponse(BaseModel):
+    repo: str
+    branch: str = "main"
+    report: str
+    signals: dict = {}

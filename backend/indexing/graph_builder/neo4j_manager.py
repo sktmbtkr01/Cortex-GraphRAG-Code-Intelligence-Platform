@@ -6,7 +6,7 @@ Handles AuraDB connectivity, constraints, and standard Cypher execution.
 from typing import Any
 
 from neo4j import GraphDatabase
-from neo4j.exceptions import ServiceUnavailable
+from neo4j.exceptions import SessionExpired, ServiceUnavailable, TransientError
 
 from core.config import settings
 from core.logger import get_logger
@@ -25,6 +25,9 @@ class Neo4jManager:
         self.driver = GraphDatabase.driver(
             settings.neo4j_uri,
             auth=(settings.neo4j_username, settings.neo4j_password),
+            max_connection_lifetime=300,
+            connection_timeout=15,
+            keep_alive=True,
         )
         self.verify_connectivity()
 
@@ -64,9 +67,21 @@ class Neo4jManager:
 
     def run_query(self, query: str, parameters: dict[str, Any] | None = None) -> list[dict]:
         """Execute a raw Cypher query and return the list of records."""
-        with self.driver.session() as session:
-            result = session.run(query, parameters or {})
-            return [dict(record) for record in result]
+        last_error: Exception | None = None
+        for attempt in range(2):
+            try:
+                with self.driver.session() as session:
+                    result = session.run(query, parameters or {})
+                    return [dict(record) for record in result]
+            except (ServiceUnavailable, SessionExpired, TransientError, OSError) as e:
+                last_error = e
+                logger.warning(
+                    "Neo4j query failed on attempt %s/2, retrying with a fresh session: %s",
+                    attempt + 1,
+                    e,
+                )
+                self.verify_connectivity()
+        raise last_error or RuntimeError("Neo4j query failed")
 
     def clear_database(self) -> None:
         """Wipes the entire database. DANGER!"""

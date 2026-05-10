@@ -182,6 +182,9 @@ def route_from_agent(state: AgentState) -> Literal["tools", "critic", END]: # ty
     """Decide where to go after the agent generates a response."""
     messages = state["messages"]
     last_message = messages[-1]
+
+    if state.get("loop_count", 0) >= 4:
+        return "critic"
     
     if hasattr(last_message, "tool_calls") and last_message.tool_calls:
         return "tools"
@@ -232,12 +235,18 @@ builder.add_conditional_edges(
 # Compile with a recursion limit explicitly managed
 cortex_supervisor = builder.compile()
 
-async def run_agent(query: str, repo: str | None = None, history: list[HistoryMessage] | None = None, user_id: str | None = None) -> list[BaseMessage]:
+async def run_agent(
+    query: str,
+    repo: str | None = None,
+    branch: str | None = None,
+    history: list[HistoryMessage] | None = None,
+    user_id: str | None = None,
+) -> list[BaseMessage]:
     """Execute the compiled LangGraph supervisor with tenant isolation."""
     from agents.tools import set_agent_user_context
     
     # Set user context so all tool calls are scoped to this user's data
-    set_agent_user_context(user_id)
+    set_agent_user_context(user_id, branch)
     
     messages = []
     if history:
@@ -251,12 +260,14 @@ async def run_agent(query: str, repo: str | None = None, history: list[HistoryMe
     q_str = f"User Request: {query}\n"
     if repo:
         q_str += f"Target Repository: {repo}\n"
+        if branch:
+            q_str += f"Target Branch: {branch}\n"
     else:
         q_str += "Note: No specific repository selected. Search across ALL repositories you have access to.\n"
         
     messages.append(HumanMessage(content=q_str))
     
-    config = {"recursion_limit": 10} # includes tool bounces
+    config = {"recursion_limit": 16} # includes tool bounces and critic pass
     final_state = await cortex_supervisor.ainvoke(
         {"messages": messages, "loop_count": 0, "context": []},
         config=config

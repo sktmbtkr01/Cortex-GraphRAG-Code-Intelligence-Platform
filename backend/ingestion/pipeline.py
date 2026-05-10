@@ -61,6 +61,8 @@ class IngestionPipeline:
         self,
         repo: str,
         branch: str = "main",
+        commit_sha: str | None = None,
+        ingest_run_id: str | None = None,
         include_issues: bool = True,
         include_prs: bool = True,
         include_commits: bool = True,
@@ -73,9 +75,12 @@ class IngestionPipeline:
         Full ingestion pipeline: fetch → parse → scan → chunk → embed → graph.
         
         All chunks and graph nodes are tagged with user_id for row-level isolation.
-        Public repos are additionally flagged with is_public=True so guests can search them.
+        Public repos are flagged with is_public=True for access checks and metadata.
         """
-        logger.info(f"Starting ingestion for {repo} on branch {branch} (user={user_id}, public={is_public})")
+        logger.info(
+            f"Starting ingestion for {repo} on branch {branch} "
+            f"(commit={commit_sha}, run={ingest_run_id}, user={user_id}, public={is_public})"
+        )
 
         stats = {
             "files_parsed": 0,
@@ -95,6 +100,8 @@ class IngestionPipeline:
             logger.error(f"Invalid repo format: {repo}. Expected 'owner/repo'.")
             raise ValueError("Repo must be in the format 'owner/repo'")
 
+        graph_repo_id = f"{repo}::{branch}"
+
         try:
             await self.github_client.__aenter__()
             # ── 1. Fetch file tree ────────────────────────────────────
@@ -110,11 +117,15 @@ class IngestionPipeline:
             # Setup base repository node with user_id tagging
             if self.graph_enabled:
                 await self._emit_progress(progress_cb, "graph_building", "Initializing repository graph node")
-                self.neo4j.merge_tenant_node("Repository", repo, {
+                self.neo4j.merge_tenant_node("Repository", graph_repo_id, {
                     "full_name": repo, 
                     "owner": owner, 
                     "name": repo_name,
+                    "branch": branch,
                     "default_branch": branch,
+                    "commit_sha": commit_sha,
+                    "ingest_run_id": ingest_run_id,
+                    "ingestion_status": "processing",
                 }, user_id, is_public)
 
             # ── 2. Filter, fetch, parse, chunk, graph files ───────────
@@ -169,6 +180,9 @@ class IngestionPipeline:
             processed_files = await self._process_files_concurrently(
                 fetched_ok,
                 repo,
+                branch,
+                commit_sha,
+                ingest_run_id,
                 user_id,
                 is_public,
             )
@@ -194,23 +208,30 @@ class IngestionPipeline:
                 # Graph Extraction (Static)
                 if self.graph_enabled:
                     await self._emit_progress(progress_cb, "graph_building", f"Extracting graph edges for {path}")
-                    file_id = f"{repo}::{path}"
+                    file_id = f"{graph_repo_id}::{path}"
                     self.neo4j.merge_tenant_node("File", file_id, {
-                        "path": path, "repo": repo, "language": parsed_file.language,
+                        "path": path, "repo": repo, "branch": branch, "commit_sha": commit_sha,
+                        "ingest_run_id": ingest_run_id,
+                        "language": parsed_file.language,
                     }, user_id, is_public)
-                    self.neo4j.merge_tenant_relationship("Repository", repo, "File", file_id, "CONTAINS", user_id, is_public)
+                    self.neo4j.merge_tenant_relationship("Repository", graph_repo_id, "File", file_id, "CONTAINS", user_id, is_public)
 
                     edges = []
                     if parsed_file.language == "python":
-                        edges = NodeEdgeExtractor.extract_python_edges(path, repo, parsed_file.content)
+                        edges = NodeEdgeExtractor.extract_python_edges(path, graph_repo_id, parsed_file.content)
                     elif parsed_file.language in ("javascript", "typescript", "tsx"):
-                        edges = NodeEdgeExtractor.extract_js_ts_edges(path, repo, parsed_file.content)
+                        edges = NodeEdgeExtractor.extract_js_ts_edges(path, graph_repo_id, parsed_file.content)
 
                     if path.endswith(("package.json", "requirements.txt", "go.mod")):
-                        edges.extend(NodeEdgeExtractor.parse_manifest(path, repo, parsed_file.content))
+                        edges.extend(NodeEdgeExtractor.parse_manifest(path, graph_repo_id, parsed_file.content))
 
                     for edge in edges:
-                        node_props = {}
+                        node_props = {
+                            "repo": repo,
+                            "branch": branch,
+                            "commit_sha": commit_sha,
+                            "ingest_run_id": ingest_run_id,
+                        }
                         if "properties" in edge:
                             node_props.update(edge["properties"])
                         self.neo4j.merge_tenant_node(edge["to_label"], edge["to_id"], node_props, user_id, is_public)
@@ -235,7 +256,7 @@ class IngestionPipeline:
                 
                 if self.graph_enabled:
                     await self._emit_progress(progress_cb, "graph_building", "Building issue graph")
-                    await self.git_graph.build_issue_graph(issues, repo, user_id=user_id, is_public=is_public)
+                    await self.git_graph.build_issue_graph(issues, repo, branch=branch, user_id=user_id, is_public=is_public)
                     
                 for issue in issues:
                     if "pull_request" not in issue:
@@ -254,6 +275,9 @@ class IngestionPipeline:
                         for c in chunks:
                             c.user_id = user_id
                             c.is_public = is_public
+                            c.branch = branch
+                            c.commit_sha = commit_sha
+                            c.ingest_run_id = ingest_run_id
                         all_chunks.extend(chunks)
 
             # ── 4. Pull Requests ──────────────────────────────────────
@@ -267,7 +291,7 @@ class IngestionPipeline:
                 
                 if self.graph_enabled:
                     await self._emit_progress(progress_cb, "graph_building", "Building pull request graph")
-                    await self.git_graph.build_pr_graph(prs, repo, user_id=user_id, is_public=is_public)
+                    await self.git_graph.build_pr_graph(prs, repo, branch=branch, user_id=user_id, is_public=is_public)
                     
                 for pr in prs:
                     try:
@@ -291,6 +315,9 @@ class IngestionPipeline:
                     for c in chunks:
                         c.user_id = user_id
                         c.is_public = is_public
+                        c.branch = branch
+                        c.commit_sha = commit_sha
+                        c.ingest_run_id = ingest_run_id
                     all_chunks.extend(chunks)
                     
             # ── 5. Commits ────────────────────────────────────────────
@@ -299,7 +326,7 @@ class IngestionPipeline:
                 # We fetch commits solely for graph history, not for RAG chunking
                 commits = await self.github_client.fetch_commits(owner, repo_name, limit=max_commits)
                 await self._emit_progress(progress_cb, "graph_building", "Building commit graph")
-                await self.git_graph.build_commit_graph(commits, repo, user_id=user_id, is_public=is_public)
+                await self.git_graph.build_commit_graph(commits, repo, branch=branch, user_id=user_id, is_public=is_public)
 
             # ── 6. Embed and Upsert (with user_id in payload) ─────────
             if all_chunks:
@@ -331,12 +358,6 @@ class IngestionPipeline:
 
             stats["chunks_created"] = len(all_chunks)
 
-            # Phase 7 Webhook Registration
-            try:
-                await self._register_webhook(owner, repo_name)
-            except Exception as w_err:
-                logger.warning(f"Failed to register webhook: {w_err}")
-
             logger.info(
                 f"Ingestion complete for {repo}. "
                 f"Parsed: {stats['files_parsed']}, Skipped: {stats['files_skipped']}, "
@@ -350,7 +371,16 @@ class IngestionPipeline:
             logger.error(f"Ingestion failed for {repo}: {e}")
             raise
 
-    def _chunk_parsed_file(self, parsed_file, repo: str, user_id: str | None, is_public: bool) -> list[Chunk]:
+    def _chunk_parsed_file(
+        self,
+        parsed_file,
+        repo: str,
+        branch: str,
+        commit_sha: str | None,
+        ingest_run_id: str | None,
+        user_id: str | None,
+        is_public: bool,
+    ) -> list[Chunk]:
         """Route a parsed file to the correct chunker based on source_type, tagging with user_id."""
         if parsed_file.source_type == "code":
             chunks = self.ast_chunker.chunk(
@@ -374,6 +404,9 @@ class IngestionPipeline:
         for c in chunks:
             c.user_id = user_id
             c.is_public = is_public
+            c.branch = branch
+            c.commit_sha = commit_sha
+            c.ingest_run_id = ingest_run_id
         
         return chunks
 
@@ -384,6 +417,9 @@ class IngestionPipeline:
         repo: str,
         user_id: str | None,
         is_public: bool,
+        branch: str = "main",
+        commit_sha: str | None = None,
+        ingest_run_id: str | None = None,
     ) -> dict:
         path = item["path"]
 
@@ -391,7 +427,7 @@ class IngestionPipeline:
         safe_content = redact_text(content) if secrets_redacted else content
 
         parsed_file = route_file(path, safe_content)
-        chunks = self._chunk_parsed_file(parsed_file, repo, user_id, is_public)
+        chunks = self._chunk_parsed_file(parsed_file, repo, branch, commit_sha, ingest_run_id, user_id, is_public)
         if secrets_redacted:
             for chunk in chunks:
                 chunk.metadata["secrets_redacted"] = secrets_redacted
@@ -439,6 +475,9 @@ class IngestionPipeline:
         self,
         fetched_files: list[tuple[dict, str]],
         repo: str,
+        branch: str,
+        commit_sha: str | None,
+        ingest_run_id: str | None,
         user_id: str | None,
         is_public: bool,
     ) -> list[dict]:
@@ -453,6 +492,9 @@ class IngestionPipeline:
                     repo,
                     user_id,
                     is_public,
+                    branch,
+                    commit_sha,
+                    ingest_run_id,
                 )
                 result["index"] = index
                 return result

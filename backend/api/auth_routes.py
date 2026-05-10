@@ -3,7 +3,6 @@ Cortex Auth API Routes.
 
 Provides endpoints for:
 - GitHub OAuth login initiation and callback
-- Guest login (anonymous access to public repos)
 - Current user profile retrieval
 """
 
@@ -13,7 +12,6 @@ from urllib.parse import urlencode
 from core.auth import (
     AuthenticatedUser,
     clear_session_cookie,
-    create_access_token,
     exchange_github_code,
     get_current_user,
     set_session_cookie,
@@ -35,10 +33,6 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 class GitHubCallbackRequest(BaseModel):
     code: str  # The OAuth authorization code from GitHub redirect
-
-
-class GuestLoginRequest(BaseModel):
-    display_name: str = "Guest"
 
 
 class AuthResponse(BaseModel):
@@ -98,37 +92,6 @@ async def github_callback(
     result = await exchange_github_code(request.code)
     set_session_cookie(response, result["access_token"])
     return AuthResponse(user=result["user"])
-
-
-@router.post("/guest", response_model=AuthResponse)
-async def guest_login(
-    request: GuestLoginRequest,
-    response: Response,
-) -> AuthResponse:
-    """
-    Create a guest session for users who want to explore public repos
-    without GitHub authentication. Sets the session as an HttpOnly cookie.
-    """
-    import uuid
-
-    guest_id = str(uuid.uuid4())[:8]
-    user = AuthenticatedUser(
-        user_id=f"guest:{guest_id}",
-        login=request.display_name or f"guest-{guest_id}",
-        provider="guest",
-    )
-
-    token = create_access_token(user)
-    set_session_cookie(response, token)
-
-    return AuthResponse(
-        user={
-            "user_id": user.user_id,
-            "login": user.login,
-            "provider": user.provider,
-            "avatar_url": None,
-        },
-    )
 
 
 @router.post("/logout")

@@ -1,17 +1,19 @@
 "use client";
 
 import React, { useEffect, useRef, useState } from "react";
-import { RefreshCw, GitBranch as GitHubIcon, Link2, Sparkles } from "lucide-react";
+import { RefreshCw, GitBranch as GitHubIcon, Sparkles } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import MarkdownMessage from "@/components/MarkdownMessage";
+import HealthCheckReport from "@/components/HealthCheckReport";
 import RepoCard from "@/components/RepoCard";
-import { parseRepoUrl } from "@/app/utils/parseRepoUrl";
 import Drawer from "@/components/Drawer";
 import IngestToasts from "@/components/IngestToasts";
 import { openIngestEventStream, type IngestStreamEvent } from "@/app/utils/sse";
 
 interface Repo {
   repo: string;
+  branch: string;
+  commit_sha?: string | null;
   is_private: boolean;
   ingestion_status?: string;
 }
@@ -26,20 +28,25 @@ interface GitHubRepo {
   warning?: string;
 }
 
+interface GitHubBranch {
+  name: string;
+  commit_sha?: string | null;
+}
+
 export default function ReposPage() {
   const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
   const { authHeaders } = useAuth();
-
-  const [mode, setMode] = useState<"my" | "url">("my");
 
   const [repos, setRepos] = useState<Repo[]>([]);
   const [myRepos, setMyRepos] = useState<GitHubRepo[]>([]);
   const [myReposWarning, setMyReposWarning] = useState("");
   const [selectedMyRepo, setSelectedMyRepo] = useState("");
-  const [repoUrl, setRepoUrl] = useState("");
+  const [branches, setBranches] = useState<GitHubBranch[]>([]);
+  const [selectedBranch, setSelectedBranch] = useState("main");
 
   const [loading, setLoading] = useState(false);
   const [ingestStatus, setIngestStatus] = useState("");
+  const [repoLoadWarning, setRepoLoadWarning] = useState("");
 
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [drawerTitle, setDrawerTitle] = useState("");
@@ -65,7 +72,14 @@ export default function ReposPage() {
     try {
       const res = await fetch(`${API_URL}/api/v1/repos`, { headers: authHeaders(), credentials: "include" });
       const data = await res.json();
-      setRepos(data);
+      if (Array.isArray(data)) {
+        setRepos(data);
+        setRepoLoadWarning("");
+      } else {
+        console.warn("Unexpected repos response", data);
+        setRepos([]);
+        setRepoLoadWarning("Could not load indexed repositories. Check backend auth/session and API logs.");
+      }
     } catch (e) {
       console.error("Failed to fetch repos", e);
     }
@@ -83,10 +97,11 @@ export default function ReposPage() {
         return;
       }
       const data = await res.json();
-      setMyRepos(data);
-      setMyReposWarning(data?.[0]?.warning || "");
-      if (data.length > 0) {
-        setSelectedMyRepo(data[0].full_name);
+      const repoItems = Array.isArray(data) ? data : [];
+      setMyRepos(repoItems);
+      setMyReposWarning(repoItems?.[0]?.warning || "");
+      if (repoItems.length > 0) {
+        setSelectedMyRepo(repoItems[0].full_name);
       }
     } catch (e) {
       console.error("Failed to fetch GitHub repos", e);
@@ -109,16 +124,54 @@ export default function ReposPage() {
     };
   }, []);
 
+  useEffect(() => {
+    const repoToLoad = resolveIngestRepo();
+    if (!repoToLoad) {
+      setBranches([]);
+      setSelectedBranch("main");
+      return;
+    }
+
+    const meta = myRepoMetaByName[repoToLoad];
+    const defaultBranch = meta?.default_branch || "main";
+    setSelectedBranch(defaultBranch);
+
+    const [owner, name] = repoToLoad.split("/");
+    if (!owner || !name) return;
+
+    fetch(`${API_URL}/api/v1/github/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/branches`, {
+      headers: authHeaders(),
+      credentials: "include",
+    })
+      .then((res) => (res.ok ? res.json() : []))
+      .then((data) => {
+        const loaded = Array.isArray(data) ? data : [];
+        setBranches(loaded);
+        if (loaded.some((b: GitHubBranch) => b.name === defaultBranch)) {
+          setSelectedBranch(defaultBranch);
+        } else if (loaded[0]?.name) {
+          setSelectedBranch(loaded[0].name);
+        }
+      })
+      .catch(() => setBranches([]));
+  }, [selectedMyRepo, myRepoMetaByName, API_URL, authHeaders]);
+
   const pushToast = (event: IngestStreamEvent) => {
-    setToastEvents((prev) => [
-      ...prev,
-      {
-        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        stage: event.stage,
-        message: event.message,
-        state: event.state === "lost" ? "error" : event.state === "queued" ? "running" : event.state,
-      },
-    ]);
+    const toast = {
+      id: `${event.stage}-${event.state}`,
+      stage: event.stage,
+      message: event.message,
+      state: event.state === "lost" ? "error" as const : event.state === "queued" ? "running" as const : event.state,
+    };
+
+    setToastEvents((prev) => {
+      if (toast.state === "done" || toast.state === "error") {
+        return [toast];
+      }
+
+      const next = [...prev.filter((item) => item.stage !== toast.stage), toast];
+      return next.filter((item) => item.state === "running").slice(-4);
+    });
   };
 
   const closeStream = () => {
@@ -155,6 +208,7 @@ export default function ReposPage() {
       void fetchRepos();
       closeStream();
       closePoll();
+      setTimeout(() => setToastEvents([]), 4500);
     }
 
     if (event.state === "lost") {
@@ -163,6 +217,7 @@ export default function ReposPage() {
       setIngestStatus(event.message);
       closeStream();
       closePoll();
+      setTimeout(() => setToastEvents([]), 6500);
       return;
     }
 
@@ -172,6 +227,7 @@ export default function ReposPage() {
       setIngestStatus(`Ingest failed: ${event.message}`);
       closeStream();
       closePoll();
+      setTimeout(() => setToastEvents([]), 6500);
     }
   };
 
@@ -207,10 +263,7 @@ export default function ReposPage() {
   };
 
   const resolveIngestRepo = (): string | null => {
-    if (mode === "my") {
-      return selectedMyRepo || null;
-    }
-    return parseRepoUrl(repoUrl);
+    return selectedMyRepo || null;
   };
 
   const handleIngest = async (e: React.FormEvent<HTMLFormElement>) => {
@@ -218,7 +271,7 @@ export default function ReposPage() {
 
     const repoToIngest = resolveIngestRepo();
     if (!repoToIngest) {
-      alert(mode === "my" ? "Select a repository first." : "Enter a valid GitHub repo URL.");
+      alert("Select a repository first.");
       return;
     }
 
@@ -232,7 +285,7 @@ export default function ReposPage() {
         headers: authHeaders(),
         body: JSON.stringify({
           repo: repoToIngest,
-          branch: "main",
+          branch: selectedBranch || "main",
           include_issues: false,
           include_prs: false,
           include_commits: false,
@@ -243,7 +296,6 @@ export default function ReposPage() {
       if (!res.ok) alert("Error: " + data.detail);
       else {
         setIngestStatus(`Job queued: ${data.job_id}`);
-        setRepoUrl("");
 
         closeStream();
         closePoll();
@@ -283,11 +335,11 @@ export default function ReposPage() {
     }
   };
 
-  const handleDelete = async (repoName: string) => {
-    if (!confirm(`Are you sure you want to delete ${repoName} from the index?`)) return;
+  const handleDelete = async (repoName: string, branchName: string) => {
+    if (!confirm(`Are you sure you want to delete ${repoName} @ ${branchName} from the index?`)) return;
 
     try {
-      const res = await fetch(`${API_URL}/api/v1/repos/${repoName}`, {
+      const res = await fetch(`${API_URL}/api/v1/repos/${repoName}?branch=${encodeURIComponent(branchName)}`, {
         method: "DELETE",
         credentials: "include",
         headers: authHeaders(),
@@ -299,13 +351,13 @@ export default function ReposPage() {
     }
   };
 
-  const handleViewSnapshot = async (repoName: string) => {
-    setDrawerTitle(`Architecture Snapshot: ${repoName}`);
+  const handleViewSnapshot = async (repoName: string, branchName: string) => {
+    setDrawerTitle(`Architecture Snapshot: ${repoName} @ ${branchName}`);
     setDrawerContent("");
     setDrawerLoading(true);
     setDrawerOpen(true);
     try {
-      const res = await fetch(`${API_URL}/api/v1/repos/${repoName}/snapshot`, { headers: authHeaders(), credentials: "include" });
+      const res = await fetch(`${API_URL}/api/v1/repos/${repoName}/snapshot?branch=${encodeURIComponent(branchName)}`, { headers: authHeaders(), credentials: "include" });
       const data = await res.json();
       if (res.ok) setDrawerContent(data.snapshot);
       else setDrawerContent(`Error: ${data.detail}`);
@@ -316,13 +368,76 @@ export default function ReposPage() {
     }
   };
 
-  const handleRunAudit = async (repoName: string) => {
-    setDrawerTitle(`Security Audit: ${repoName}`);
+  const handleUpdate = async (repoName: string, branchName: string) => {
+    if (!confirm(`Check for updates and refresh ${repoName} @ ${branchName} if needed?`)) return;
+
+    setLoading(true);
+    ingestActiveRef.current = true;
+    setIngestStatus(`Checking updates for ${repoName} @ ${branchName}...`);
+
+    try {
+      const res = await fetch(`${API_URL}/api/v1/repos/${repoName}/branches/${encodeURIComponent(branchName)}/update`, {
+        method: "POST",
+        credentials: "include",
+        headers: authHeaders(),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        alert("Error: " + data.detail);
+        setLoading(false);
+        ingestActiveRef.current = false;
+        return;
+      }
+
+      if (data.status === "up_to_date") {
+        setIngestStatus(`${repoName} @ ${branchName} is already up to date.`);
+        setLoading(false);
+        ingestActiveRef.current = false;
+        void fetchRepos();
+        return;
+      }
+
+      setIngestStatus(`Update queued: ${data.job_id}`);
+      closeStream();
+      closePoll();
+      ingestCursorRef.current = 0;
+      ingestSseSeenEventRef.current = false;
+      const es = openIngestEventStream(
+        API_URL,
+        data.job_id,
+        (event) => {
+          ingestSseSeenEventRef.current = true;
+          handleIngestEvent(event, repoName);
+        },
+        () => {
+          if (ingestActiveRef.current) {
+            closeStream();
+            startPollingFallback(data.job_id, repoName);
+          }
+        },
+      );
+
+      ingestStreamRef.current = es;
+      ingestWatchdogRef.current = setTimeout(() => {
+        if (ingestActiveRef.current && !ingestSseSeenEventRef.current) {
+          closeStream();
+          startPollingFallback(data.job_id, repoName);
+        }
+      }, 3000);
+    } catch {
+      setIngestStatus("Failed to check updates. Check backend logs.");
+      setLoading(false);
+      ingestActiveRef.current = false;
+    }
+  };
+
+  const handleRunHealthCheck = async (repoName: string, branchName: string) => {
+    setDrawerTitle(`Health Check: ${repoName} @ ${branchName}`);
     setDrawerContent("");
     setDrawerLoading(true);
     setDrawerOpen(true);
     try {
-      const res = await fetch(`${API_URL}/api/v1/repos/${repoName}/audit`, {
+      const res = await fetch(`${API_URL}/api/v1/repos/${repoName}/health-check?branch=${encodeURIComponent(branchName)}`, {
         method: "POST",
         credentials: "include",
         headers: authHeaders()
@@ -331,7 +446,7 @@ export default function ReposPage() {
       if (res.ok) setDrawerContent(data.report);
       else setDrawerContent(`Error: ${data.detail}`);
     } catch (e) {
-      setDrawerContent("Failed to run security audit.");
+      setDrawerContent("Failed to run repository health check.");
     } finally {
       setDrawerLoading(false);
     }
@@ -350,46 +465,46 @@ export default function ReposPage() {
 
           <div style={{ display: "inline-flex", gap: 8, marginTop: 12, marginBottom: 16 }}>
             <button type="button" disabled={loading}>
-              {mode === "my" ? <GitHubIcon size={14} /> : <Link2 size={14} />} {mode === "my" ? "My Repositories" : "Public URL"}
-            </button>
-            <button
-              type="button"
-              onClick={() => setMode(mode === "my" ? "url" : "my")}
-              style={{ background: "var(--panel)", color: "var(--foreground)" }}
-            >
-              Switch to {mode === "my" ? "Public URL" : "My Repositories"}
+              <GitHubIcon size={14} /> My Repositories
             </button>
           </div>
 
           <form className="form-row" onSubmit={handleIngest} style={{ padding: 0, border: "none", flexDirection: "column", alignItems: "stretch" }}>
-            {mode === "my" ? (
-              <select
-                value={selectedMyRepo}
-                onChange={(e) => setSelectedMyRepo(e.target.value)}
-                aria-label="My repositories"
-                disabled={loading || myRepos.length === 0}
-              >
-                {myRepos.length === 0 ? (
-                  <option value="">No GitHub repos available</option>
-                ) : (
-                  myRepos.map((repo) => (
-                    <option key={repo.full_name} value={repo.full_name}>
-                      {repo.full_name} {repo.private ? "(private)" : "(public)"}
-                    </option>
-                  ))
-                )}
-              </select>
-            ) : (
-              <input
-                value={repoUrl}
-                onChange={(e) => setRepoUrl(e.target.value)}
-                aria-label="GitHub URL"
-                placeholder="https://github.com/vercel/next.js"
-                disabled={loading}
-              />
-            )}
+            <select
+              value={selectedMyRepo}
+              onChange={(e) => setSelectedMyRepo(e.target.value)}
+              aria-label="My repositories"
+              disabled={loading || myRepos.length === 0}
+            >
+              {myRepos.length === 0 ? (
+                <option value="">No GitHub repos available</option>
+              ) : (
+                myRepos.map((repo) => (
+                  <option key={repo.full_name} value={repo.full_name}>
+                    {repo.full_name} {repo.private ? "(private)" : "(public)"}
+                  </option>
+                ))
+              )}
+            </select>
 
-            <button type="submit" disabled={loading || (mode === "my" ? !selectedMyRepo : !repoUrl.trim())}>
+            <select
+              value={selectedBranch}
+              onChange={(e) => setSelectedBranch(e.target.value)}
+              aria-label="Repository branch"
+              disabled={loading}
+            >
+              {branches.length === 0 ? (
+                <option value={selectedBranch || "main"}>{selectedBranch || "main"}</option>
+              ) : (
+                branches.map((branch) => (
+                  <option key={branch.name} value={branch.name}>
+                    {branch.name}
+                  </option>
+                ))
+              )}
+            </select>
+
+            <button type="submit" disabled={loading || !selectedMyRepo}>
               {loading ? <RefreshCw className="spinner" size={16} /> : "Ingest"}
             </button>
           </form>
@@ -399,30 +514,33 @@ export default function ReposPage() {
               {ingestStatus}
             </div>
           )}
-          {myReposWarning && mode === "my" && (
+          {myReposWarning && (
             <p style={{ marginTop: 10, color: "var(--warn)", fontSize: 12 }}>{myReposWarning}</p>
           )}
-          <p style={{ marginTop: 10, color: "var(--muted)", fontSize: 12 }}>
-            Tip: GitHub dropdown is available for OAuth users. Guest mode can still ingest via Public URL.
-          </p>
         </article>
 
         <article className="panel">
           <h2>Indexed Repos</h2>
+          {repoLoadWarning && (
+            <p style={{ color: "var(--warn)", fontSize: 12, marginBottom: 10 }}>{repoLoadWarning}</p>
+          )}
           {repos.length === 0 ? (
             <div className="empty-state">No repositories indexed yet.</div>
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
               {repos.map(r => (
                 <RepoCard
-                  key={r.repo}
+                  key={`${r.repo}@${r.branch}`}
                   repo={r.repo}
+                  branch={r.branch || "main"}
+                  commitSha={r.commit_sha}
                   isPrivate={r.is_private}
                   ingestionStatus={r.ingestion_status}
                   language={myRepoMetaByName[r.repo]?.language ?? null}
                   stars={myRepoMetaByName[r.repo]?.stars ?? 0}
                   onSnapshot={handleViewSnapshot}
-                  onAudit={handleRunAudit}
+                  onHealthCheck={handleRunHealthCheck}
+                  onUpdate={handleUpdate}
                   onDelete={handleDelete}
                 />
               ))}
@@ -443,6 +561,8 @@ export default function ReposPage() {
               <div style={{ display: "flex", alignItems: "center", gap: 12, color: "var(--muted)" }}>
                 <RefreshCw className="spinner" size={18} /> Processing...
               </div>
+            ) : drawerTitle.startsWith("Health Check:") ? (
+                <HealthCheckReport content={drawerContent} />
             ) : (
               <MarkdownMessage content={drawerContent} />
             )}

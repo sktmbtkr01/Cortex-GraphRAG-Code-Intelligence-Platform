@@ -4,14 +4,14 @@ import React from "react";
 import { useRouter } from "next/navigation";
 import { QUICK_PROMPTS } from "@/app/utils/quickPrompts";
 
-export default function QuickPrompts({ repo }: { repo: string }) {
+export default function QuickPrompts({ repo, branch }: { repo: string; branch?: string }) {
   const router = useRouter();
 
   return (
     <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
       {QUICK_PROMPTS.map((item) => {
         const q = item.buildPrompt(repo);
-        const href = `/query?repo=${encodeURIComponent(repo)}&q=${encodeURIComponent(q)}&autorun=1`;
+        const href = `/query?repo=${encodeURIComponent(repo)}&branch=${encodeURIComponent(branch || "main")}&q=${encodeURIComponent(q)}&autorun=1`;
         return (
           <button
             key={item.id}

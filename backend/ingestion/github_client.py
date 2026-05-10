@@ -2,6 +2,7 @@ import base64
 import asyncio
 from contextlib import asynccontextmanager
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait_exponential_jitter
@@ -150,9 +151,34 @@ class GitHubClient:
         logger.info(f"Fetching metadata for {owner}/{repo}")
         return await self._request("GET", url)
 
+    async def fetch_branches(self, owner: str, repo: str) -> list[dict[str, Any]]:
+        """Fetch branches for a repository."""
+        url = f"{self.base_url}/repos/{owner}/{repo}/branches"
+        branches: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            params = {"per_page": 100, "page": page}
+            logger.info("Fetching branches page %s for %s/%s", page, owner, repo)
+            page_data = await self._request("GET", url, params=params)
+            if not page_data:
+                break
+            branches.extend(page_data)
+            page += 1
+            if len(page_data) < 100:
+                break
+        return branches
+
+    async def fetch_branch(self, owner: str, repo: str, branch: str) -> dict[str, Any]:
+        """Fetch a single branch and its current head commit metadata."""
+        encoded_branch = quote(branch, safe="")
+        url = f"{self.base_url}/repos/{owner}/{repo}/branches/{encoded_branch}"
+        logger.info("Fetching branch %s for %s/%s", branch, owner, repo)
+        return await self._request("GET", url)
+
     async def fetch_file_tree(self, owner: str, repo: str, branch: str = "main") -> list[dict[str, Any]]:
         """Fetch flat list of all files in the repository."""
-        url = f"{self.base_url}/repos/{owner}/{repo}/git/trees/{branch}?recursive=1"
+        encoded_branch = quote(branch, safe="")
+        url = f"{self.base_url}/repos/{owner}/{repo}/git/trees/{encoded_branch}?recursive=1"
         logger.info(f"Fetching file tree for {owner}/{repo} on branch {branch}")
         data = await self._request("GET", url)
         return [item for item in data.get("tree", []) if item["type"] == "blob"]
@@ -275,31 +301,6 @@ class GitHubClient:
                 "page": page,
             }
             logger.info("Fetching user repos page %s", page)
-            page_data = await self._request("GET", url, params=params)
-            if not page_data:
-                break
-
-            repos.extend(page_data)
-            page += 1
-            if len(page_data) < params["per_page"]:
-                break
-
-        return repos[:max_repos]
-
-    async def list_public_repos_for_user(self, username: str, max_repos: int = 200) -> list[dict[str, Any]]:
-        """List public repositories for a GitHub username (no OAuth token required)."""
-        url = f"{self.base_url}/users/{username}/repos"
-        repos: list[dict[str, Any]] = []
-        page = 1
-
-        while len(repos) < max_repos:
-            params = {
-                "type": "owner",
-                "sort": "updated",
-                "per_page": min(100, max_repos - len(repos)),
-                "page": page,
-            }
-            logger.info("Fetching public repos page %s for %s", page, username)
             page_data = await self._request("GET", url, params=params)
             if not page_data:
                 break

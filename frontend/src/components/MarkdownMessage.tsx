@@ -14,7 +14,69 @@ const initShiki = async () => {
   return highlighter;
 };
 
-// Extremely simple Markdown parser that extracts code blocks
+function renderInline(text: string) {
+  const parts = text.split(/(`[^`]+`|\*\*[^*]+\*\*)/g);
+  return parts.map((part, index) => {
+    if (part.startsWith("`") && part.endsWith("`")) {
+      return <code key={index}>{part.slice(1, -1)}</code>;
+    }
+    if (part.startsWith("**") && part.endsWith("**")) {
+      return <strong key={index}>{part.slice(2, -2)}</strong>;
+    }
+    return <React.Fragment key={index}>{part}</React.Fragment>;
+  });
+}
+
+function renderMarkdownText(text: string, keyPrefix: string) {
+  const lines = text.split("\n");
+  const nodes: React.ReactNode[] = [];
+  let listItems: string[] = [];
+
+  const flushList = () => {
+    if (listItems.length === 0) return;
+    const listKey = `${keyPrefix}-list-${nodes.length}`;
+    nodes.push(
+      <ul key={listKey}>
+        {listItems.map((item, index) => (
+          <li key={`${listKey}-${index}`}>{renderInline(item)}</li>
+        ))}
+      </ul>
+    );
+    listItems = [];
+  };
+
+  lines.forEach((line, index) => {
+    const trimmed = line.trim();
+    const bullet = trimmed.match(/^[-*]\s+(.+)$/);
+
+    if (bullet) {
+      listItems.push(bullet[1]);
+      return;
+    }
+
+    flushList();
+
+    if (!trimmed) {
+      nodes.push(<div key={`${keyPrefix}-space-${index}`} className="markdown-gap" />);
+      return;
+    }
+
+    if (trimmed.startsWith("### ")) {
+      nodes.push(<h3 key={`${keyPrefix}-h3-${index}`}>{renderInline(trimmed.slice(4))}</h3>);
+    } else if (trimmed.startsWith("## ")) {
+      nodes.push(<h2 key={`${keyPrefix}-h2-${index}`}>{renderInline(trimmed.slice(3))}</h2>);
+    } else if (trimmed.startsWith("# ")) {
+      nodes.push(<h2 key={`${keyPrefix}-h1-${index}`}>{renderInline(trimmed.slice(2))}</h2>);
+    } else {
+      nodes.push(<p key={`${keyPrefix}-p-${index}`}>{renderInline(trimmed)}</p>);
+    }
+  });
+
+  flushList();
+  return nodes;
+}
+
+// Lightweight Markdown renderer with Shiki-powered fenced code blocks.
 export default function MarkdownMessage({ content }: { content: string }) {
   const [htmlContent, setHtmlContent] = useState<React.ReactNode[]>([]);
 
@@ -44,17 +106,7 @@ export default function MarkdownMessage({ content }: { content: string }) {
           return <pre key={index} className="fallback-code"><code>{code}</code></pre>;
         }
         
-        // Simple line breaks for prose
-        return (
-          <span key={index}>
-            {part.split('\n').map((line, i) => (
-              <React.Fragment key={i}>
-                {line}
-                {i < part.split('\n').length - 1 && <br />}
-              </React.Fragment>
-            ))}
-          </span>
-        );
+        return <React.Fragment key={index}>{renderMarkdownText(part, `md-${index}`)}</React.Fragment>;
       });
 
       setHtmlContent(renderedParts);

@@ -27,7 +27,10 @@ def generate_chunk_id(chunk: Chunk) -> str:
 
     # Base identity includes tenant ownership to prevent same-repo overwrites
     # between users while preserving deterministic re-indexing for one user.
-    identity_str = f"{tenant_prefix(chunk.user_id, chunk.is_public)}::{chunk.repo}::{chunk.file_path}::{chunk.chunk_type}"
+    identity_str = (
+        f"{tenant_prefix(chunk.user_id, chunk.is_public)}::"
+        f"{chunk.repo}::{chunk.branch}::{chunk.file_path}::{chunk.chunk_type}"
+    )
 
     # Add specific discriminators
     if chunk.function_name:
@@ -82,6 +85,7 @@ class VectorStore:
                     f"dimension {existing_dense_dim}, but EMBEDDING_DIMENSIONS={self.dense_dim}. "
                     "Recreate the collection or switch to a matching embedding model."
                 )
+            self._create_payload_indices()
             logger.info(f"Qdrant collection '{self.collection_name}' exists.")
         except UnexpectedResponse as e:
             if "Not found" in str(e):
@@ -110,6 +114,9 @@ class VectorStore:
         """Create indices on payload fields used frequently in filtering operations."""
         indices = [
             ("repo", qmodels.PayloadSchemaType.KEYWORD),
+            ("branch", qmodels.PayloadSchemaType.KEYWORD),
+            ("commit_sha", qmodels.PayloadSchemaType.KEYWORD),
+            ("ingest_run_id", qmodels.PayloadSchemaType.KEYWORD),
             ("file_path", qmodels.PayloadSchemaType.KEYWORD),
             ("source_type", qmodels.PayloadSchemaType.KEYWORD),
             ("chunk_type", qmodels.PayloadSchemaType.KEYWORD),
@@ -118,11 +125,17 @@ class VectorStore:
         ]
         
         for field, schema_type in indices:
-            self.client.create_payload_index(
-                collection_name=self.collection_name,
-                field_name=field,
-                field_schema=schema_type,
-            )
+            try:
+                self.client.create_payload_index(
+                    collection_name=self.collection_name,
+                    field_name=field,
+                    field_schema=schema_type,
+                )
+            except UnexpectedResponse as e:
+                message = str(e).lower()
+                if "already exists" in message or "conflict" in message:
+                    continue
+                raise
         logger.info("Created metadata payload indices in Qdrant.")
 
     def upsert_chunks(self, chunks: list[Chunk], dense_vectors: list[list[float]], sparse_vectors: list[dict]) -> None:
@@ -142,6 +155,9 @@ class VectorStore:
 
             payload: dict[str, Any] = {
                 "repo": chunk.repo,
+                "branch": chunk.branch,
+                "commit_sha": chunk.commit_sha,
+                "ingest_run_id": chunk.ingest_run_id,
                 "file_path": chunk.file_path,
                 "language": chunk.language,
                 "source_type": chunk.source_type,
@@ -187,29 +203,35 @@ class VectorStore:
         )
         logger.info(f"Upserted {len(points)} chunks to Qdrant collection '{self.collection_name}'.")
 
-    def delete_by_file(self, repo: str, file_path: str) -> None:
+    def delete_by_file(self, repo: str, file_path: str, branch: str | None = None) -> None:
         """Filter-delete all chunks associated with a specific file. Used for webhooks."""
+        must_conditions = [
+            qmodels.FieldCondition(
+                key="repo",
+                match=qmodels.MatchValue(value=repo)
+            ),
+            qmodels.FieldCondition(
+                key="file_path",
+                match=qmodels.MatchValue(value=file_path)
+            ),
+        ]
+        if branch:
+            must_conditions.append(
+                qmodels.FieldCondition(
+                    key="branch",
+                    match=qmodels.MatchValue(value=branch)
+                )
+            )
         self.client.delete(
             collection_name=self.collection_name,
             points_selector=qmodels.FilterSelector(
-                filter=qmodels.Filter(
-                    must=[
-                        qmodels.FieldCondition(
-                            key="repo",
-                            match=qmodels.MatchValue(value=repo)
-                        ),
-                        qmodels.FieldCondition(
-                            key="file_path",
-                            match=qmodels.MatchValue(value=file_path)
-                        ),
-                    ]
-                )
+                filter=qmodels.Filter(must=must_conditions)
             )
         )
-        logger.info(f"Deleted chunks for {repo}/{file_path}")
+        logger.info(f"Deleted chunks for {repo}/{file_path} (branch={branch})")
 
-    def delete_by_repo(self, repo: str, user_id: str | None = None) -> None:
-        """Filter-delete all chunks associated with a specific repo, scoped by user_id."""
+    def delete_by_repo(self, repo: str, user_id: str | None = None, branch: str | None = None) -> None:
+        """Filter-delete chunks associated with a repo, optionally scoped by branch and user_id."""
         try:
             self.client.get_collection(self.collection_name)
         except UnexpectedResponse as e:
@@ -235,13 +257,89 @@ class VectorStore:
                     match=qmodels.MatchValue(value=user_id)
                 )
             )
+        if branch:
+            must_conditions.append(
+                qmodels.FieldCondition(
+                    key="branch",
+                    match=qmodels.MatchValue(value=branch)
+                )
+            )
         self.client.delete(
             collection_name=self.collection_name,
             points_selector=qmodels.FilterSelector(
                 filter=qmodels.Filter(must=must_conditions)
             )
         )
-        logger.info(f"Deleted all chunks for repo {repo} (user={user_id})")
+        logger.info(f"Deleted chunks for repo {repo} (branch={branch}, user={user_id})")
+
+    def delete_stale_branch_runs(
+        self,
+        repo: str,
+        branch: str,
+        active_ingest_run_id: str,
+        user_id: str | None = None,
+    ) -> None:
+        """Delete chunks for a repo branch that do not belong to the active ingest run."""
+        must_conditions = [
+            qmodels.FieldCondition(key="repo", match=qmodels.MatchValue(value=repo)),
+            qmodels.FieldCondition(key="branch", match=qmodels.MatchValue(value=branch)),
+        ]
+        if user_id:
+            must_conditions.append(
+                qmodels.FieldCondition(key="user_id", match=qmodels.MatchValue(value=user_id))
+            )
+
+        self.client.delete(
+            collection_name=self.collection_name,
+            points_selector=qmodels.FilterSelector(
+                filter=qmodels.Filter(
+                    must=must_conditions,
+                    must_not=[
+                        qmodels.FieldCondition(
+                            key="ingest_run_id",
+                            match=qmodels.MatchValue(value=active_ingest_run_id),
+                        )
+                    ],
+                )
+            ),
+        )
+        logger.info(
+            "Deleted stale chunks for repo %s branch %s excluding run %s",
+            repo,
+            branch,
+            active_ingest_run_id,
+        )
+
+    def delete_branch_run(
+        self,
+        repo: str,
+        branch: str,
+        ingest_run_id: str,
+        user_id: str | None = None,
+    ) -> None:
+        """Delete chunks for one failed/incomplete ingest run."""
+        must_conditions = [
+            qmodels.FieldCondition(key="repo", match=qmodels.MatchValue(value=repo)),
+            qmodels.FieldCondition(key="branch", match=qmodels.MatchValue(value=branch)),
+            qmodels.FieldCondition(key="ingest_run_id", match=qmodels.MatchValue(value=ingest_run_id)),
+        ]
+        if user_id:
+            must_conditions.append(
+                qmodels.FieldCondition(key="user_id", match=qmodels.MatchValue(value=user_id))
+            )
+
+        self.client.delete(
+            collection_name=self.collection_name,
+            points_selector=qmodels.FilterSelector(
+                filter=qmodels.Filter(must=must_conditions)
+            ),
+        )
+        logger.info(
+            "Deleted chunks for failed repo %s branch %s run %s",
+            repo,
+            branch,
+            ingest_run_id,
+        )
 
     def search(
         self,

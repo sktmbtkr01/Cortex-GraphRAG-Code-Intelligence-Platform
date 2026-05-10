@@ -29,10 +29,14 @@ class GitGraphBuilder:
         matches = pattern.findall(text)
         return [int(m) for m in matches]
 
+    def _branch_repo_id(self, repo: str, branch: str) -> str:
+        return f"{repo}::{branch}"
+
     def _merge_contributor(
         self,
         user_dict: dict | None,
         repo: str,
+        branch: str,
         user_id: str | None,
         is_public: bool,
     ) -> str | None:
@@ -41,7 +45,8 @@ class GitGraphBuilder:
             return None
 
         login = user_dict["login"]
-        contributor_id = f"{repo}::contributor::{login}"
+        graph_repo_id = self._branch_repo_id(repo, branch)
+        contributor_id = f"{graph_repo_id}::contributor::{login}"
         self.db.merge_tenant_node(
             "Contributor",
             contributor_id,
@@ -49,6 +54,7 @@ class GitGraphBuilder:
                 "login": login,
                 "name": login,
                 "repo": repo,
+                "branch": branch,
                 "type": user_dict.get("type", "User"),
             },
             user_id,
@@ -60,6 +66,7 @@ class GitGraphBuilder:
         self,
         issues: list[dict],
         repo: str,
+        branch: str = "main",
         user_id: str | None = None,
         is_public: bool = False,
     ) -> None:
@@ -68,19 +75,21 @@ class GitGraphBuilder:
         Nodes: :Issue, :Label, :Contributor
         Edges: (Contributor)-[:OPENED]->(Issue), (Issue)-[:LABELED]->(Label)
         """
+        graph_repo_id = self._branch_repo_id(repo, branch)
         for issue in issues:
             if "pull_request" in issue:
                 continue
 
             issue_number = issue["number"]
-            issue_id = f"{repo}::issue::{issue_number}"
-            author_id = self._merge_contributor(issue.get("user"), repo, user_id, is_public)
+            issue_id = f"{graph_repo_id}::issue::{issue_number}"
+            author_id = self._merge_contributor(issue.get("user"), repo, branch, user_id, is_public)
 
             self.db.merge_tenant_node(
                 "Issue",
                 issue_id,
                 {
                     "repo": repo,
+                    "branch": branch,
                     "number": issue_number,
                     "title": issue.get("title", ""),
                     "state": issue.get("state", ""),
@@ -104,11 +113,11 @@ class GitGraphBuilder:
             for label in issue.get("labels", []):
                 label_name = label if isinstance(label, str) else label.get("name", "")
                 if label_name:
-                    label_id = f"{repo}::label::{label_name.lower()}"
+                    label_id = f"{graph_repo_id}::label::{label_name.lower()}"
                     self.db.merge_tenant_node(
                         "Label",
                         label_id,
-                        {"name": label_name, "repo": repo},
+                        {"name": label_name, "repo": repo, "branch": branch},
                         user_id,
                         is_public,
                     )
@@ -126,6 +135,7 @@ class GitGraphBuilder:
         self,
         prs: list[dict],
         repo: str,
+        branch: str = "main",
         user_id: str | None = None,
         is_public: bool = False,
     ) -> None:
@@ -134,11 +144,12 @@ class GitGraphBuilder:
         Edges: (Contributor)-[:OPENED]->(PR), (PR)-[:MODIFIES]->(File), (PR)-[:CLOSES]->(Issue)
         """
         owner, repo_name = repo.split("/")
+        graph_repo_id = self._branch_repo_id(repo, branch)
 
         for pr in prs:
             pr_number = pr["number"]
-            pr_id = f"{repo}::pr::{pr_number}"
-            author_id = self._merge_contributor(pr.get("user"), repo, user_id, is_public)
+            pr_id = f"{graph_repo_id}::pr::{pr_number}"
+            author_id = self._merge_contributor(pr.get("user"), repo, branch, user_id, is_public)
 
             body = pr.get("body") or ""
 
@@ -147,6 +158,7 @@ class GitGraphBuilder:
                 pr_id,
                 {
                     "repo": repo,
+                    "branch": branch,
                     "number": pr_number,
                     "title": pr.get("title", ""),
                     "state": pr.get("state", ""),
@@ -170,7 +182,7 @@ class GitGraphBuilder:
 
             linked_issues = self._extract_linked_issues(body)
             for iss_num in linked_issues:
-                iss_id = f"{repo}::issue::{iss_num}"
+                iss_id = f"{graph_repo_id}::issue::{iss_num}"
                 self.db.merge_tenant_relationship(
                     "PullRequest",
                     pr_id,
@@ -186,11 +198,11 @@ class GitGraphBuilder:
                 for f in pr_files:
                     path = f.get("filename")
                     if path:
-                        file_id = f"{repo}::{path}"
+                        file_id = f"{graph_repo_id}::{path}"
                         self.db.merge_tenant_node(
                             "File",
                             file_id,
-                            {"path": path, "repo": repo},
+                            {"path": path, "repo": repo, "branch": branch},
                             user_id,
                             is_public,
                         )
@@ -211,6 +223,7 @@ class GitGraphBuilder:
         self,
         commits: list[dict],
         repo: str,
+        branch: str = "main",
         user_id: str | None = None,
         is_public: bool = False,
     ) -> None:
@@ -218,20 +231,22 @@ class GitGraphBuilder:
         Nodes: :Commit, :File, :Contributor
         Edges: (Contributor)-[:AUTHORED]->(Commit), (Commit)-[:TOUCHES]->(File)
         """
+        graph_repo_id = self._branch_repo_id(repo, branch)
         for commit_obj in commits:
             sha = commit_obj["sha"]
-            commit_id = f"{repo}::commit::{sha}"
+            commit_id = f"{graph_repo_id}::commit::{sha}"
 
             commit_data = commit_obj.get("commit", {})
             author_obj = commit_obj.get("author")
 
-            author_id = self._merge_contributor(author_obj, repo, user_id, is_public)
+            author_id = self._merge_contributor(author_obj, repo, branch, user_id, is_public)
 
             self.db.merge_tenant_node(
                 "Commit",
                 commit_id,
                 {
                     "repo": repo,
+                    "branch": branch,
                     "sha": sha,
                     "message": commit_data.get("message", "")[:200],
                     "date": commit_data.get("author", {}).get("date", ""),
@@ -254,11 +269,11 @@ class GitGraphBuilder:
             for f in commit_obj.get("files", []):
                 path = f.get("filename")
                 if path:
-                    file_id = f"{repo}::{path}"
+                    file_id = f"{graph_repo_id}::{path}"
                     self.db.merge_tenant_node(
                         "File",
                         file_id,
-                        {"path": path, "repo": repo},
+                        {"path": path, "repo": repo, "branch": branch},
                         user_id,
                         is_public,
                     )

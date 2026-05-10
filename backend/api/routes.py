@@ -1,8 +1,13 @@
 import asyncio
 import json
+import re
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
+from google import genai
+from google.genai import types
+from langchain_core.messages import AIMessage, ToolMessage
 
 from core.auth import AuthenticatedUser, get_current_user
 from core.config import settings
@@ -13,23 +18,31 @@ from models.schemas import (
     IngestJobResponse,
     QueryRequest,
     QueryResponse,
+    RetrievalTraceStep,
     RepoStatus,
     SnapshotResponse,
     AuditResponse,
+    HealthCheckResponse,
 )
 
 router = APIRouter()
 
 
 from indexing.qdrant_store import VectorStore
+from indexing.embedder import CortexEmbedder
 from indexing.graph_builder.neo4j_manager import Neo4jManager
 from retrieval.rag_pipeline import RAGPipeline
 from agents.supervisor import run_agent
+from agents.tools import get_call_graph, get_dependencies, set_agent_user_context
 from ingestion.pipeline import IngestionPipeline
 from ingestion.github_client import GitHubClient
 from agents.summarizer import generate_repo_snapshot
 from core.job_store import job_store
 from core.tenant import tenant_scoped_id
+
+
+def _repo_branch_id(repo: str, branch: str) -> str:
+    return f"{repo}::{branch}"
 
 
 def _json_safe_graph_value(value):
@@ -52,11 +65,138 @@ def _json_safe_graph_properties(properties: dict) -> dict:
     return {key: _json_safe_graph_value(value) for key, value in properties.items()}
 
 
+def _route_query_intent(query: str) -> str:
+    """Small deterministic router for obvious tool-needed queries."""
+    q = query.lower()
+    if any(term in q for term in ("calls", "called by", "call graph", "who calls", "what calls")):
+        return "graph"
+    if any(term in q for term in ("import ", "imports", "imported by", "depends on", "dependency", "package", "module usage")):
+        return "graph"
+    if any(term in q for term in ("history", "modified", "changed", "pr ", "pull request", "commit")):
+        return "agent"
+    return "semantic"
+
+
+def _graph_tool_intent(query: str) -> tuple[str, str] | None:
+    """Return the deterministic graph tool and target entity for obvious queries."""
+    q = query.strip()
+    lowered = q.lower()
+
+    call_match = re.search(
+        r"(?:what|who)\s+calls\s+[`'\"]?([A-Za-z_][\w.]*)[`'\"]?|call graph\s+(?:for|of)\s+[`'\"]?([A-Za-z_][\w.]*)[`'\"]?",
+        q,
+        flags=re.IGNORECASE,
+    )
+    if call_match:
+        return "get_call_graph", next(group for group in call_match.groups() if group)
+
+    dep_match = re.search(
+        r"(?:who\s+imports|what\s+imports|imported\s+by|dependency usage of|module usage of|depends on)\s+[`'\"]?([A-Za-z_][\w.-]*)[`'\"]?",
+        q,
+        flags=re.IGNORECASE,
+    )
+    if dep_match:
+        return "get_dependencies", dep_match.group(1)
+
+    if any(term in lowered for term in ("dependency", "package", "module usage", "imports")):
+        tokens = re.findall(r"[A-Za-z_][\w.-]*", q)
+        stopwords = {"who", "what", "where", "imports", "import", "imported", "by", "dependency", "usage", "of", "package", "module", "depends", "on"}
+        candidates = [token for token in tokens if token.lower() not in stopwords]
+        if candidates:
+            return "get_dependencies", candidates[-1]
+
+    return None
+
+
+def _trace_kind(tool_name: str) -> str:
+    if tool_name in {"get_call_graph", "get_dependencies"}:
+        return "graph"
+    if tool_name in {"get_file_history", "get_file_content"}:
+        return "file"
+    if tool_name in {"search_code", "search_issues"}:
+        return "semantic"
+    if tool_name == "calculate_math":
+        return "utility"
+    return "agent"
+
+
+def _summarize_tool_result(content: str) -> str:
+    text = content.strip().replace("\r", "")
+    if not text:
+        return "Returned no visible output"
+    if text.startswith("No "):
+        return text.splitlines()[0][:180]
+    lines = [line for line in text.splitlines() if line.strip()]
+    return f"Returned {len(lines)} lines of tool output"
+
+
+def _tool_output_has_no_data(content: str) -> bool:
+    text = content.strip().lower()
+    return (
+        not text
+        or text.startswith("no ")
+        or "no call graph data found" in text
+        or "none found" in text
+        or "no pr history found" in text
+        or "not found in index" in text
+    )
+
+
+def _extract_trace(messages: list) -> list[RetrievalTraceStep]:
+    trace: list[RetrievalTraceStep] = []
+    pending: dict[str, dict] = {}
+
+    for msg in messages:
+        if isinstance(msg, AIMessage):
+            for call in msg.tool_calls or []:
+                call_id = call.get("id") or f"call-{len(pending) + 1}"
+                pending[call_id] = {
+                    "tool": call.get("name", "unknown_tool"),
+                    "input": call.get("args") or {},
+                }
+        elif isinstance(msg, ToolMessage):
+            call = pending.pop(msg.tool_call_id, None)
+            tool_name = getattr(msg, "name", None) or (call or {}).get("tool") or "unknown_tool"
+            trace.append(
+                RetrievalTraceStep(
+                    step=len(trace) + 1,
+                    kind=_trace_kind(tool_name),
+                    tool=tool_name,
+                    input=(call or {}).get("input") or {},
+                    summary=_summarize_tool_result(str(msg.content)),
+                )
+            )
+
+    return trace
+
+
+def _answer_from_trace(trace: list[RetrievalTraceStep]) -> str:
+    if not trace:
+        return "I could not produce an answer from the available retrieval steps."
+
+    no_data = [
+        step.summary
+        for step in trace
+        if step.summary.lower().startswith("no ") or "no " in step.summary.lower()
+    ]
+    if no_data:
+        return "\n".join(f"- {item}" for item in no_data)
+
+    return "Retrieval summary:\n\n" + "\n".join(
+        f"- {step.tool}: {step.summary}" for step in trace
+    )
+
+
 async def _run_ingest_job(
     job_id: str,
     request: IngestRequest,
     user: AuthenticatedUser,
+    initial_status: str = "processing",
+    failure_status: str = "failed",
+    previous_commit_sha: str | None = None,
 ) -> None:
+    ingest_run_id: str | None = None
+
     async def emit_progress(stage: str, message: str, meta: dict | None = None) -> None:
         await job_store.publish(
             job_id,
@@ -70,7 +210,9 @@ async def _run_ingest_job(
         )
 
     try:
-        await emit_progress("starting", f"Starting ingest for {request.repo}")
+        branch = request.branch or "main"
+        ingest_run_id = str(uuid.uuid4())
+        await emit_progress("starting", f"Starting ingest for {request.repo} @ {branch}")
 
         owner, repo_name = request.repo.split("/")
 
@@ -86,19 +228,22 @@ async def _run_ingest_job(
             )
 
         default_branch = metadata.get("default_branch") or "main"
+        repo_branch_id = _repo_branch_id(request.repo, branch)
         neo4j = None
         try:
             neo4j = Neo4jManager()
             neo4j.merge_tenant_node(
                 "Repository",
-                request.repo,
+                repo_branch_id,
                 {
                     "full_name": request.repo,
                     "owner": owner,
                     "name": repo_name,
+                    "branch": branch,
                     "default_branch": default_branch,
                     "is_private": bool(metadata.get("private", True)),
-                    "ingestion_status": "processing",
+                    "ingestion_status": initial_status,
+                    "ingest_run_id": ingest_run_id,
                 },
                 user.user_id,
                 metadata.get("private", True) is False,
@@ -106,10 +251,24 @@ async def _run_ingest_job(
         except Exception:
             neo4j = None
 
+        async with GitHubClient(token=user.github_token) as client:
+            branch_data = await client.fetch_branch(owner, repo_name, branch)
+        commit_sha = (branch_data.get("commit") or {}).get("sha")
+        if neo4j is not None:
+            neo4j.run_query(
+                "MATCH (r:Repository {id: $repo}) SET r.commit_sha = $commit_sha",
+                {
+                    "repo": tenant_scoped_id(repo_branch_id, user.user_id, metadata.get("private", True) is False),
+                    "commit_sha": commit_sha,
+                },
+            )
+
         pipeline = IngestionPipeline(github_token=user.github_token)
         stats = await pipeline.ingest_repo(
             repo=request.repo,
-            branch=default_branch,
+            branch=branch,
+            commit_sha=commit_sha,
+            ingest_run_id=ingest_run_id,
             include_issues=False,
             include_prs=False,
             include_commits=False,
@@ -120,12 +279,62 @@ async def _run_ingest_job(
         )
 
         await emit_progress("snapshot", "Generating architectural snapshot")
-        snapshot = await generate_repo_snapshot(request.repo, user.user_id)
+        snapshot = await generate_repo_snapshot(request.repo, user.user_id, branch=branch)
+
+        if neo4j is not None:
+            try:
+                VectorStore().delete_stale_branch_runs(
+                    request.repo,
+                    branch,
+                    active_ingest_run_id=ingest_run_id,
+                    user_id=user.user_id,
+                )
+            except Exception:
+                pass
+        try:
+            neo4j = neo4j or Neo4jManager()
+            neo4j.merge_tenant_node(
+                "Repository",
+                repo_branch_id,
+                {
+                    "full_name": request.repo,
+                    "owner": owner,
+                    "name": repo_name,
+                    "branch": branch,
+                    "default_branch": default_branch,
+                    "is_private": bool(metadata.get("private", True)),
+                    "ingestion_status": "ready",
+                    "ingest_run_id": ingest_run_id,
+                    "commit_sha": commit_sha,
+                },
+                user.user_id,
+                metadata.get("private", True) is False,
+            )
+        except Exception:
+            pass
 
         if neo4j is not None:
             neo4j.run_query(
-                "MATCH (r:Repository {id: $repo}) SET r.ingestion_status = 'ready', r.last_ingest_at = datetime()",
-                {"repo": tenant_scoped_id(request.repo, user.user_id, metadata.get("private", True) is False)},
+                "MATCH (n) WHERE n.repo = $repo AND n.user_id = $user_id "
+                "AND coalesce(n.branch, 'main') = $branch "
+                "AND (n.ingest_run_id IS NULL OR n.ingest_run_id <> $ingest_run_id) "
+                "DETACH DELETE n",
+                {
+                    "repo": request.repo,
+                    "branch": branch,
+                    "user_id": user.user_id,
+                    "ingest_run_id": ingest_run_id,
+                },
+            )
+            neo4j.run_query(
+                "MATCH (r:Repository {id: $repo}) "
+                "SET r.ingestion_status = 'ready', r.last_ingest_at = datetime(), "
+                "r.ingest_run_id = $ingest_run_id, r.commit_sha = $commit_sha",
+                {
+                    "repo": tenant_scoped_id(repo_branch_id, user.user_id, metadata.get("private", True) is False),
+                    "ingest_run_id": ingest_run_id,
+                    "commit_sha": commit_sha,
+                },
             )
 
         await job_store.publish(
@@ -135,17 +344,48 @@ async def _run_ingest_job(
                 "state": "done",
                 "stage": "done",
                 "repo": request.repo,
+                "branch": branch,
+                "previous_commit_sha": previous_commit_sha,
+                "commit_sha": commit_sha,
                 "message": "Ingestion complete",
                 "stats": stats,
                 "snapshot": snapshot,
             },
         )
     except Exception as e:
+        branch = request.branch or "main"
         try:
+            if ingest_run_id:
+                try:
+                    VectorStore().delete_branch_run(
+                        request.repo,
+                        branch,
+                        ingest_run_id=ingest_run_id,
+                        user_id=user.user_id,
+                    )
+                except Exception:
+                    pass
+
             neo4j = Neo4jManager()
+            if ingest_run_id:
+                neo4j.run_query(
+                    "MATCH (n) WHERE n.repo = $repo AND n.user_id = $user_id "
+                    "AND coalesce(n.branch, 'main') = $branch "
+                    "AND n.ingest_run_id = $ingest_run_id DETACH DELETE n",
+                    {
+                        "repo": request.repo,
+                        "branch": branch,
+                        "user_id": user.user_id,
+                        "ingest_run_id": ingest_run_id,
+                    },
+                )
             neo4j.run_query(
-                "MATCH (r:Repository {id: $repo}) SET r.ingestion_status = 'failed', r.last_ingest_error = $error",
-                {"repo": tenant_scoped_id(request.repo, user.user_id), "error": str(e)},
+                "MATCH (r:Repository {id: $repo}) SET r.ingestion_status = $status, r.last_ingest_error = $error",
+                {
+                    "repo": tenant_scoped_id(_repo_branch_id(request.repo, branch), user.user_id),
+                    "error": str(e),
+                    "status": failure_status,
+                },
             )
         except Exception:
             pass
@@ -157,6 +397,7 @@ async def _run_ingest_job(
                 "state": "error",
                 "stage": "error",
                 "repo": request.repo,
+                "branch": request.branch or "main",
                 "message": str(e),
             },
         )
@@ -180,8 +421,79 @@ async def ingest_repo(
         job_id=job_id,
         status="accepted",
         repo=request.repo,
-        message="Ingestion started in background",
+        branch=request.branch or "main",
+        message=f"Ingestion started in background for {request.repo} @ {request.branch or 'main'}",
     )
+
+
+@router.post("/repos/{owner}/{repo_name}/branches/{branch:path}/update", response_model=IngestJobResponse)
+async def update_repo_branch(
+    owner: str,
+    repo_name: str,
+    branch: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> IngestJobResponse:
+    """Check a branch head SHA and queue re-ingestion only when it changed."""
+    full_name = f"{owner}/{repo_name}"
+    try:
+        neo4j = Neo4jManager()
+        rows = neo4j.run_query(
+            "MATCH (r:Repository {full_name: $repo}) "
+            "WHERE r.user_id = $user_id AND coalesce(r.branch, r.default_branch, 'main') = $branch "
+            "RETURN r.commit_sha AS commit_sha, r.is_public AS is_public",
+            {"repo": full_name, "branch": branch, "user_id": user.user_id},
+        )
+        if not rows:
+            raise HTTPException(status_code=404, detail="Indexed branch not found")
+
+        previous_commit_sha = rows[0].get("commit_sha")
+        async with GitHubClient(token=user.github_token) as github:
+            branch_data = await github.fetch_branch(owner, repo_name, branch)
+        latest_commit_sha = (branch_data.get("commit") or {}).get("sha")
+
+        if previous_commit_sha and latest_commit_sha == previous_commit_sha:
+            return IngestJobResponse(
+                job_id="",
+                status="up_to_date",
+                repo=full_name,
+                branch=branch,
+                previous_commit_sha=previous_commit_sha,
+                latest_commit_sha=latest_commit_sha,
+                message=f"{full_name} @ {branch} is already up to date",
+            )
+
+        job_id = job_store.create_job(user_id=user.user_id, repo=full_name)
+        request = IngestRequest(
+            repo=full_name,
+            branch=branch,
+            include_issues=False,
+            include_prs=False,
+            include_commits=False,
+            max_commits=0,
+        )
+        asyncio.create_task(
+            _run_ingest_job(
+                job_id=job_id,
+                request=request,
+                user=user,
+                initial_status="updating",
+                failure_status="update_failed",
+                previous_commit_sha=previous_commit_sha,
+            )
+        )
+        return IngestJobResponse(
+            job_id=job_id,
+            status="accepted",
+            repo=full_name,
+            branch=branch,
+            previous_commit_sha=previous_commit_sha,
+            latest_commit_sha=latest_commit_sha,
+            message=f"Update started for {full_name} @ {branch}",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/ingest/stream")
@@ -300,8 +612,11 @@ async def list_repos(
         records = neo4j.run_query(
             "MATCH (r:Repository) "
             "WHERE (r.user_id = $user_id OR r.is_public = true) "
-            "RETURN r.full_name AS repo, r.is_private AS is_private, "
-            "coalesce(r.ingestion_status, 'ready') AS ingestion_status, r.user_id AS owner_id",
+            "RETURN r.full_name AS repo, coalesce(r.branch, r.default_branch, 'main') AS branch, "
+            "r.commit_sha AS commit_sha, r.is_private AS is_private, "
+            "coalesce(r.ingestion_status, 'ready') AS ingestion_status, "
+            "r.last_ingest_at AS last_indexed, r.user_id AS owner_id "
+            "ORDER BY repo, branch",
             {"user_id": user.user_id},
         )
         repos = []
@@ -315,11 +630,35 @@ async def list_repos(
             repos.append(
                 RepoStatus(
                     repo=repo_name,
+                    branch=str(r.get("branch") or "main"),
+                    commit_sha=r.get("commit_sha"),
                     is_private=is_priv,
                     ingestion_status=str(r.get("ingestion_status") or "ready"),
                 )
             )
         return repos
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/github/repos/{owner}/{repo_name}/branches")
+async def list_repo_branches(
+    owner: str,
+    repo_name: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> list[dict[str, object]]:
+    """List branches for a GitHub repository the user can access."""
+    try:
+        async with GitHubClient(token=user.github_token) as github:
+            branches = await github.fetch_branches(owner, repo_name)
+        return [
+            {
+                "name": b.get("name"),
+                "commit_sha": (b.get("commit") or {}).get("sha"),
+            }
+            for b in branches
+            if b.get("name")
+        ]
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -330,15 +669,13 @@ async def list_my_github_repos(
 ) -> list[dict[str, object]]:
     """List repositories from the authenticated user's GitHub account."""
     try:
+        if not user.github_token:
+            raise HTTPException(
+                status_code=401,
+                detail="GitHub session expired. Sign in again to access repositories.",
+            )
         async with GitHubClient(token=user.github_token) as github:
-            if user.github_token:
-                repos = await github.list_user_repos(max_repos=200)
-                warning = None
-            elif user.provider == "github" and user.login:
-                repos = await github.list_public_repos_for_user(user.login, max_repos=200)
-                warning = "OAuth session expired on server. Showing public repositories only; sign in again to restore private repos."
-            else:
-                return []
+            repos = await github.list_user_repos(max_repos=200)
 
         return [
             {
@@ -348,11 +685,12 @@ async def list_my_github_repos(
                 "language": r.get("language"),
                 "stars": int(r.get("stargazers_count", 0) or 0),
                 "default_branch": r.get("default_branch") or "main",
-                "warning": warning,
             }
             for r in repos
             if r.get("full_name")
         ]
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -361,39 +699,57 @@ async def list_my_github_repos(
 async def delete_repo(
     owner: str,
     repo_name: str,
+    branch: str | None = None,
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> dict[str, str]:
-    """Delete a repository. Only the owner can delete their own repos."""
+    """Delete a repository branch index, or all branches when branch is omitted."""
     full_name = f"{owner}/{repo_name}"
     try:
         # Verify ownership before deletion
         neo4j = Neo4jManager()
-        ownership = neo4j.run_query(
+        ownership_query = (
             "MATCH (r:Repository {full_name: $repo}) "
             "WHERE r.user_id = $user_id "
-            "RETURN r.user_id AS uid",
-            {"repo": full_name, "user_id": user.user_id},
         )
+        params = {"repo": full_name, "user_id": user.user_id, "branch": branch}
+        if branch:
+            ownership_query += "AND coalesce(r.branch, r.default_branch, 'main') = $branch "
+        ownership_query += "RETURN r.user_id AS uid"
+        ownership = neo4j.run_query(ownership_query, params)
         if not ownership:
             raise HTTPException(status_code=403, detail="You can only delete your own repositories")
 
         try:
-            VectorStore().delete_by_repo(full_name, user_id=user.user_id)
+            VectorStore().delete_by_repo(full_name, user_id=user.user_id, branch=branch)
         except Exception:
             # Interrupted ingests can leave Neo4j repo/status nodes before any
             # Qdrant collection or points exist. Deletion should still clear graph state.
             pass
 
-        # Delete nodes that have this repo + user_id
-        neo4j.run_query(
-            "MATCH (n) WHERE n.repo = $repo AND n.user_id = $user_id DETACH DELETE n",
-            {"repo": full_name, "user_id": user.user_id},
-        )
-        neo4j.run_query(
-            "MATCH (r:Repository {full_name: $repo, user_id: $user_id}) DETACH DELETE r",
-            {"repo": full_name, "user_id": user.user_id},
-        )
-        return {"status": "success", "message": f"Deleted {full_name}"}
+        if branch:
+            neo4j.run_query(
+                "MATCH (n) WHERE n.repo = $repo AND n.user_id = $user_id "
+                "AND coalesce(n.branch, 'main') = $branch DETACH DELETE n",
+                {"repo": full_name, "branch": branch, "user_id": user.user_id},
+            )
+            neo4j.run_query(
+                "MATCH (r:Repository {full_name: $repo, user_id: $user_id}) "
+                "WHERE coalesce(r.branch, r.default_branch, 'main') = $branch "
+                "DETACH DELETE r",
+                {"repo": full_name, "branch": branch, "user_id": user.user_id},
+            )
+            message = f"Deleted {full_name} @ {branch}"
+        else:
+            neo4j.run_query(
+                "MATCH (n) WHERE n.repo = $repo AND n.user_id = $user_id DETACH DELETE n",
+                {"repo": full_name, "user_id": user.user_id},
+            )
+            neo4j.run_query(
+                "MATCH (r:Repository {full_name: $repo, user_id: $user_id}) DETACH DELETE r",
+                {"repo": full_name, "user_id": user.user_id},
+            )
+            message = f"Deleted all indexed branches for {full_name}"
+        return {"status": "success", "message": message}
     except HTTPException:
         raise
     except Exception as e:
@@ -411,6 +767,7 @@ async def query(
         result = await pipeline.query(
             user_query=request.query,
             repo=request.repo,
+            branch=request.branch,
             language=request.language,
             top_k=request.top_k,
             history=request.history,
@@ -426,28 +783,159 @@ async def agent_query(
     request: QueryRequest,
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> QueryResponse:
-    """Agent-powered query, scoped to user's accessible repos."""
+    """Auto-routed query with visible retrieval/tool trace."""
+    route = _route_query_intent(request.query)
     try:
+        graph_intent = _graph_tool_intent(request.query)
+        if graph_intent:
+            tool_name, target = graph_intent
+            set_agent_user_context(user.user_id, request.branch)
+            if tool_name == "get_call_graph":
+                tool_output = get_call_graph.invoke({"function_name": target, "repo": request.repo})
+            else:
+                tool_output = get_dependencies.invoke({"module_name": target, "repo": request.repo})
+
+            graph_trace = RetrievalTraceStep(
+                step=1,
+                kind="graph",
+                tool=tool_name,
+                input={"target": target, "repo": request.repo, "branch": request.branch},
+                summary=_summarize_tool_result(str(tool_output)),
+            )
+
+            if _tool_output_has_no_data(str(tool_output)):
+                rag = RAGPipeline()
+                result = await rag.query(
+                    user_query=request.query,
+                    repo=request.repo,
+                    branch=request.branch,
+                    language=request.language,
+                    top_k=request.top_k,
+                    history=request.history,
+                    user_id=user.user_id,
+                )
+                result.fallback_used = True
+                result.retrieval_mode = "semantic_fallback"
+                result.trace = [
+                    graph_trace,
+                    *[
+                        RetrievalTraceStep(
+                            step=item.step + 1,
+                            kind=item.kind,
+                            tool=item.tool,
+                            input=item.input,
+                            summary=item.summary,
+                        )
+                        for item in result.trace
+                    ],
+                ]
+                return result
+
+            rag = RAGPipeline()
+            result = await rag.query(
+                user_query=request.query,
+                repo=request.repo,
+                branch=request.branch,
+                language=request.language,
+                top_k=request.top_k,
+                history=request.history,
+                user_id=user.user_id,
+            )
+            result.retrieval_mode = "hybrid"
+            result.fallback_used = False
+            result.trace = [
+                graph_trace,
+                *[
+                    RetrievalTraceStep(
+                        step=item.step + 1,
+                        kind=item.kind,
+                        tool=item.tool,
+                        input=item.input,
+                        summary=item.summary,
+                    )
+                    for item in result.trace
+                ],
+            ]
+            return result
+
+        if route == "semantic":
+            rag = RAGPipeline()
+            result = await rag.query(
+                user_query=request.query,
+                repo=request.repo,
+                branch=request.branch,
+                language=request.language,
+                top_k=request.top_k,
+                history=request.history,
+                user_id=user.user_id,
+            )
+            result.retrieval_mode = "semantic"
+            return result
+
         messages = await run_agent(
             query=request.query,
             repo=request.repo,
+            branch=request.branch,
             history=request.history,
             user_id=user.user_id,
         )
         final_answer = messages[-1].content if messages else "No response generated."
-        return QueryResponse(answer=final_answer, sources=[])
+        trace = _extract_trace(messages)
+        if not trace:
+            trace = [
+                RetrievalTraceStep(
+                    step=1,
+                    kind="agent",
+                    tool="agent_reasoning",
+                    input={"query": request.query, "repo": request.repo, "branch": request.branch},
+                    summary="Agent produced an answer without a recorded tool call",
+                )
+            ]
+        if not str(final_answer or "").strip() or any(step.tool == "ask_human_for_clarification" for step in trace):
+            final_answer = _answer_from_trace(
+                [step for step in trace if step.tool != "ask_human_for_clarification"]
+            )
+        return QueryResponse(
+            answer=final_answer,
+            sources=[],
+            trace=trace,
+            retrieval_mode=route,
+            fallback_used=False,
+        )
     except Exception as e:
         try:
             rag = RAGPipeline()
             result = await rag.query(
                 user_query=request.query,
                 repo=request.repo,
+                branch=request.branch,
                 language=request.language,
                 top_k=request.top_k,
                 history=request.history,
                 user_id=user.user_id,
             )
-            return QueryResponse(answer=result.answer, sources=result.sources)
+            result.fallback_used = True
+            result.retrieval_mode = "semantic_fallback"
+            result.trace = [
+                RetrievalTraceStep(
+                    step=1,
+                    kind="fallback",
+                    tool="agent_query",
+                    input={"route": route},
+                    summary=f"Agent route failed, used direct RAG fallback: {str(e)[:160]}",
+                ),
+                *[
+                    RetrievalTraceStep(
+                        step=item.step + 1,
+                        kind=item.kind,
+                        tool=item.tool,
+                        input=item.input,
+                        summary=item.summary,
+                    )
+                    for item in result.trace
+                ],
+            ]
+            return result
         except Exception as fallback_error:
             raise HTTPException(
                 status_code=500,
@@ -559,6 +1047,7 @@ async def global_stats(
 @router.get("/graph/explore", response_model=GraphExploreResponse)
 async def graph_explore(
     repo: str,  # Phase 8.4: Required parameter for single-repo visual constraint
+    branch: str | None = None,
     center: str | None = None,
     depth: int = 2,
     user: AuthenticatedUser = Depends(get_current_user),
@@ -574,9 +1063,10 @@ async def graph_explore(
         # Verify user has access to this repo
         access_check = neo4j.run_query(
             "MATCH (r:Repository {full_name: $repo}) "
-            "WHERE r.user_id = $user_id OR r.is_public = true "
+            "WHERE (r.user_id = $user_id OR r.is_public = true) "
+            "AND ($branch IS NULL OR coalesce(r.branch, r.default_branch, 'main') = $branch) "
             "RETURN r.full_name AS name",
-            {"repo": repo, "user_id": user.user_id},
+            {"repo": repo, "branch": branch, "user_id": user.user_id},
         )
         if not access_check:
             raise HTTPException(status_code=403, detail="You don't have access to this repository")
@@ -587,6 +1077,8 @@ async def graph_explore(
           AND (m.repo = $repo OR m.full_name = $repo)
           AND (n.user_id = $user_id OR n.is_public = true)
           AND (m.user_id = $user_id OR m.is_public = true)
+          AND ($branch IS NULL OR coalesce(n.branch, 'main') = $branch)
+          AND ($branch IS NULL OR coalesce(m.branch, 'main') = $branch)
           AND (
             $center IS NULL OR $center = ''
             OR toLower(coalesce(n.name, n.path, n.id, '')) CONTAINS toLower($center)
@@ -601,6 +1093,7 @@ async def graph_explore(
             {
                 "center": center or "",
                 "repo": repo,
+                "branch": branch,
                 "user_id": user.user_id,
             },
         )
@@ -655,6 +1148,7 @@ async def graph_explore(
 async def get_repo_snapshot(
     owner: str,
     repo_name: str,
+    branch: str | None = None,
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> SnapshotResponse:
     """Retrieve the pre-computed architectural snapshot from Neo4j."""
@@ -665,9 +1159,10 @@ async def get_repo_snapshot(
         # Verify access
         access_check = neo4j.run_query(
             "MATCH (r:Repository {full_name: $repo}) "
-            "WHERE r.user_id = $user_id OR r.is_public = true "
+            "WHERE (r.user_id = $user_id OR r.is_public = true) "
+            "AND ($branch IS NULL OR coalesce(r.branch, r.default_branch, 'main') = $branch) "
             "RETURN r.snapshot AS snapshot",
-            {"repo": full_name, "user_id": user.user_id},
+            {"repo": full_name, "branch": branch, "user_id": user.user_id},
         )
         
         if not access_check:
@@ -683,32 +1178,197 @@ async def get_repo_snapshot(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+async def _run_repo_health_check(
+    owner: str,
+    repo_name: str,
+    branch: str | None,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> HealthCheckResponse:
+    """Generate an evidence-led repository health check, not a definitive audit."""
+    full_name = f"{owner}/{repo_name}"
+    branch_name = branch or "main"
+
+    try:
+        neo4j = Neo4jManager()
+        repo_rows = neo4j.run_query(
+            "MATCH (r:Repository {full_name: $repo}) "
+            "WHERE (r.user_id = $user_id OR r.is_public = true) "
+            "AND coalesce(r.branch, r.default_branch, 'main') = $branch "
+            "RETURN r.commit_sha AS commit_sha, r.ingestion_status AS status, "
+            "r.snapshot AS snapshot, r.last_ingest_at AS last_ingest_at, "
+            "r.health_report AS health_report, "
+            "r.health_report_commit_sha AS health_report_commit_sha, "
+            "r.health_checked_at AS health_checked_at",
+            {"repo": full_name, "branch": branch_name, "user_id": user.user_id},
+        )
+        if not repo_rows:
+            raise HTTPException(status_code=404, detail="Indexed branch not found")
+
+        repo_record = repo_rows[0]
+        commit_sha = repo_record.get("commit_sha")
+        cached_report = repo_record.get("health_report")
+        cached_commit_sha = repo_record.get("health_report_commit_sha")
+        if cached_report and commit_sha and cached_commit_sha == commit_sha:
+            return HealthCheckResponse(
+                repo=full_name,
+                branch=branch_name,
+                report=cached_report,
+                signals={
+                    "repo": full_name,
+                    "branch": branch_name,
+                    "commit_sha": commit_sha,
+                    "cache": "hit",
+                    "health_checked_at": repo_record.get("health_checked_at"),
+                },
+            )
+
+        node_rows = neo4j.run_query(
+            "MATCH (n) WHERE (n.repo = $repo OR n.full_name = $repo) "
+            "AND (n.user_id = $user_id OR n.is_public = true) "
+            "AND coalesce(n.branch, 'main') = $branch "
+            "RETURN labels(n)[0] AS label, count(n) AS count",
+            {"repo": full_name, "branch": branch_name, "user_id": user.user_id},
+        )
+        rel_rows = neo4j.run_query(
+            "MATCH (a)-[r]->(b) "
+            "WHERE (a.repo = $repo OR a.full_name = $repo) "
+            "AND (b.repo = $repo OR b.full_name = $repo) "
+            "AND (a.user_id = $user_id OR a.is_public = true) "
+            "AND (b.user_id = $user_id OR b.is_public = true) "
+            "AND coalesce(a.branch, 'main') = $branch "
+            "AND coalesce(b.branch, 'main') = $branch "
+            "RETURN type(r) AS type, count(r) AS count",
+            {"repo": full_name, "branch": branch_name, "user_id": user.user_id},
+        )
+
+        embedder = CortexEmbedder()
+        vector_store = VectorStore()
+        vector_store.ensure_collection()
+        evidence_queries = [
+            "authentication authorization middleware csrf jwt password token secret api key",
+            "dependency package requirements package.json pyproject security config",
+            "test coverage unit tests integration tests pytest jest",
+            "todo fixme hack temporary risky deprecated",
+            "database query sql raw execute eval subprocess shell command",
+        ]
+        evidence = []
+        secret_signal_count = 0
+        for query_text in evidence_queries:
+            dense_vectors = await embedder.embed_batch([query_text])
+            hits = vector_store.search(
+                query_dense=dense_vectors[0],
+                query_sparse=embedder.generate_sparse_vector(query_text),
+                filters={"repo": full_name, "branch": branch_name},
+                top_k=4,
+                user_id=user.user_id,
+            )
+            for hit in hits[:3]:
+                payload = hit.get("payload", {})
+                text = payload.get("text", "")
+                if payload.get("security_censored") or "[REDACTED]" in text:
+                    secret_signal_count += 1
+                evidence.append(
+                    {
+                        "query": query_text,
+                        "file_path": payload.get("file_path"),
+                        "line_range": (
+                            f"{payload.get('start_line')}-{payload.get('end_line')}"
+                            if payload.get("start_line") and payload.get("end_line")
+                            else None
+                        ),
+                        "source_type": payload.get("source_type"),
+                        "language": payload.get("language"),
+                        "score": hit.get("score"),
+                        "excerpt": text[:900],
+                    }
+                )
+
+        signals = {
+            "repo": full_name,
+            "branch": branch_name,
+            "commit_sha": commit_sha,
+            "ingestion_status": repo_record.get("status"),
+            "node_counts": {row["label"]: row["count"] for row in node_rows if row.get("label")},
+            "relationship_counts": {row["type"]: row["count"] for row in rel_rows if row.get("type")},
+            "secret_redaction_evidence_count": secret_signal_count,
+            "evidence_count": len(evidence),
+            "cache": "miss",
+        }
+
+        health_prompt = (
+            "Generate an evidence-led Repository Health Check for this indexed branch.\n"
+            "This is NOT a definitive security audit and must not claim complete vulnerability coverage.\n"
+            "Use only the deterministic signals and evidence excerpts below.\n\n"
+            "Required Markdown sections:\n"
+            "1. Overall Summary\n"
+            "2. Architecture And Coupling Signals\n"
+            "3. Security-Sensitive Areas To Review\n"
+            "4. Secret Exposure Signals\n"
+            "5. Dependency Surface\n"
+            "6. Testing And Maintainability Signals\n"
+            "7. Recommended Next Actions\n"
+            "8. Evidence Reviewed\n\n"
+            "Tag findings as [Evidence-backed], [Heuristic], or [Needs manual review]. "
+            "Use careful language such as 'potential risk area' or 'worth manual review'. "
+            "Do not say the repository is secure, fully audited, or definitely vulnerable unless the evidence directly proves it.\n\n"
+            f"Signals:\n{json.dumps(signals, default=str, indent=2)}\n\n"
+            f"Evidence excerpts:\n{json.dumps(evidence[:15], default=str, indent=2)}"
+        )
+
+        client = genai.Client(api_key=settings.gemini_api_key)
+        response = await client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=health_prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=(
+                    "You are Cortex's repository health-check reporter. "
+                    "Synthesize a careful, evidence-led engineering report from the provided signals only. "
+                    "Do not call tools. Do not claim complete security coverage."
+                ),
+                temperature=0.2,
+            ),
+        )
+        final_answer = response.text or "No report generated."
+        neo4j.run_query(
+            "MATCH (r:Repository {full_name: $repo}) "
+            "WHERE (r.user_id = $user_id OR r.is_public = true) "
+            "AND coalesce(r.branch, r.default_branch, 'main') = $branch "
+            "SET r.health_report = $report, "
+            "r.health_report_commit_sha = $commit_sha, "
+            "r.health_checked_at = datetime()",
+            {
+                "repo": full_name,
+                "branch": branch_name,
+                "user_id": user.user_id,
+                "report": final_answer,
+                "commit_sha": commit_sha,
+            },
+        )
+        return HealthCheckResponse(repo=full_name, branch=branch_name, report=final_answer, signals=signals)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/repos/{owner}/{repo_name}/health-check", response_model=HealthCheckResponse)
+async def run_repo_health_check(
+    owner: str,
+    repo_name: str,
+    branch: str | None = None,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> HealthCheckResponse:
+    return await _run_repo_health_check(owner, repo_name, branch, user)
+
+
 @router.post("/repos/{owner}/{repo_name}/audit", response_model=AuditResponse)
 async def run_security_audit(
     owner: str,
     repo_name: str,
+    branch: str | None = None,
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> AuditResponse:
-    """Run an on-demand deep security and architectural audit via the agent."""
-    full_name = f"{owner}/{repo_name}"
-    
-    # Run the standard agent but with a highly specific security prompt
-    audit_prompt = (
-        "Perform a comprehensive security and vulnerability audit of this repository. "
-        "Analyze the code structure for common flaws (SQL injection, XSS, insecure direct object references, CSRF, etc.), "
-        "improper secrets management (even if some were skipped, check auth logic), "
-        "and architectural single points of failure. Detail any risky dependencies or exposed endpoints. "
-        "Return a well-structured markdown report with actionable findings categorized by risk level."
-    )
-    
-    try:
-        messages = await run_agent(
-            query=audit_prompt,
-            repo=full_name,
-            history=[],
-            user_id=user.user_id,
-        )
-        final_answer = messages[-1].content if messages else "No report generated."
-        return AuditResponse(repo=full_name, report=final_answer)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    """Backward-compatible alias for the older audit route."""
+    result = await _run_repo_health_check(owner, repo_name, branch, user)
+    return AuditResponse(repo=result.repo, report=result.report)

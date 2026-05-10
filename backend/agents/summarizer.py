@@ -19,55 +19,87 @@ from indexing.embedder import CortexEmbedder
 logger = get_logger(__name__)
 
 
-async def generate_repo_snapshot(repo: str, user_id: str | None = None) -> str:
+async def generate_repo_snapshot(repo: str, user_id: str | None = None, branch: str = "main") -> str:
     """
     Generate an instant architectural snapshot for a repository.
     
     Returns the snapshot text, also stores it on the Neo4j Repository node.
     """
-    neo4j = Neo4jManager()
+    try:
+        neo4j = Neo4jManager()
+    except Exception as e:
+        logger.warning(f"Snapshot graph unavailable for {repo}: {e}")
+        return (
+            f"Architecture snapshot unavailable for {repo} @ {branch} because Neo4j "
+            "could not be reached during ingestion. The vector index may still be usable."
+        )
     
     # ── 1. Degree centrality: find the most connected files ──────────
-    scoped_repo_id = tenant_scoped_id(repo, user_id)
+    repo_branch_id = f"{repo}::{branch}"
+    scoped_repo_id = tenant_scoped_id(repo_branch_id, user_id)
 
     hub_query = """
-    MATCH (f:File {repo: $repo})-[r]-()
-    WHERE f.user_id = $user_id OR f.is_public = true
+    MATCH (f:File)-[r]-()
+    WHERE f.repo = $repo
+      AND coalesce(f.branch, 'main') = $branch
+      AND (f.user_id = $user_id OR f.is_public = true)
     WITH f, count(r) AS degree
     ORDER BY degree DESC
     LIMIT 10
     RETURN f.path AS path, f.language AS language, degree
     """
-    hubs = neo4j.run_query(hub_query, {"repo": repo, "user_id": user_id})
+    try:
+        hubs = neo4j.run_query(hub_query, {"repo": repo, "branch": branch, "user_id": user_id})
+    except Exception as e:
+        logger.warning(f"Failed to collect snapshot hub files: {e}")
+        hubs = []
     
     # ── 2. Entry points: files that are imported most ────────────────
     entry_query = """
-    MATCH (importer:File)-[:IMPORTS]->(target:File {repo: $repo})
+    MATCH (importer:File)-[:IMPORTS]->(target:File)
     WHERE (importer.user_id = $user_id OR importer.is_public = true)
       AND (target.user_id = $user_id OR target.is_public = true)
+      AND coalesce(importer.branch, 'main') = $branch
+      AND target.repo = $repo
+      AND coalesce(target.branch, 'main') = $branch
     WITH target, count(importer) AS import_count
     ORDER BY import_count DESC
     LIMIT 5
     RETURN target.path AS path, import_count
     """
-    entry_points = neo4j.run_query(entry_query, {"repo": repo, "user_id": user_id})
+    try:
+        entry_points = neo4j.run_query(entry_query, {"repo": repo, "branch": branch, "user_id": user_id})
+    except Exception as e:
+        logger.warning(f"Failed to collect snapshot entry points: {e}")
+        entry_points = []
     
     # ── 3. Dependency count ──────────────────────────────────────────
     dep_query = """
-    MATCH (r:Repository {full_name: $repo})-[:DEPENDS_ON]->(d:Dependency)
-    WHERE r.user_id = $user_id OR r.is_public = true
+    MATCH (r:Repository)-[:DEPENDS_ON]->(d:Dependency)
+    WHERE r.full_name = $repo
+      AND coalesce(r.branch, r.default_branch, 'main') = $branch
+      AND (r.user_id = $user_id OR r.is_public = true)
     RETURN d.name AS name, d.ecosystem AS ecosystem
     LIMIT 20
     """
-    dependencies = neo4j.run_query(dep_query, {"repo": repo, "user_id": user_id})
+    try:
+        dependencies = neo4j.run_query(dep_query, {"repo": repo, "branch": branch, "user_id": user_id})
+    except Exception as e:
+        logger.warning(f"Failed to collect snapshot dependencies: {e}")
+        dependencies = []
     
     # ── 4. Basic graph stats ─────────────────────────────────────────
     stats_query = """
     MATCH (n) WHERE (n.repo = $repo OR n.full_name = $repo)
       AND (n.user_id = $user_id OR n.is_public = true)
+      AND coalesce(n.branch, 'main') = $branch
     RETURN labels(n)[0] AS label, count(n) AS count
     """
-    stats = neo4j.run_query(stats_query, {"repo": repo, "user_id": user_id})
+    try:
+        stats = neo4j.run_query(stats_query, {"repo": repo, "branch": branch, "user_id": user_id})
+    except Exception as e:
+        logger.warning(f"Failed to collect snapshot stats: {e}")
+        stats = []
     stats_dict = {s["label"]: s["count"] for s in stats if s["label"]}
     
     # ── 5. Find README content from Qdrant ───────────────────────────
@@ -81,7 +113,7 @@ async def generate_repo_snapshot(repo: str, user_id: str | None = None) -> str:
         hits = vs.search(
             query_dense=dense[0],
             query_sparse=sparse,
-            filters={"repo": repo, "source_type": "docs"},
+            filters={"repo": repo, "branch": branch, "source_type": "docs"},
             top_k=3,
             user_id=user_id,
         )
@@ -96,7 +128,7 @@ async def generate_repo_snapshot(repo: str, user_id: str | None = None) -> str:
         logger.warning(f"Failed to fetch README for snapshot: {e}")
     
     # ── 6. Build context for the LLM ────────────────────────────────
-    context = f"Repository: {repo}\n\n"
+    context = f"Repository: {repo}\nBranch: {branch}\n\n"
     
     context += "## Graph Statistics\n"
     for label, count in stats_dict.items():

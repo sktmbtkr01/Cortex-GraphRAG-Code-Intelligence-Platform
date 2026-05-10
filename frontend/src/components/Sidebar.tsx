@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { MessageSquare, Database, Share2, LogOut, GitBranch as GitHubIcon, User } from "lucide-react";
+import { MessageSquare, Database, Share2, LogOut, GitBranch as GitHubIcon } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 
 export default function Sidebar() {
@@ -54,25 +54,21 @@ export default function Sidebar() {
       {/* User Profile & Logout */}
       <div className="sidebar-user">
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          {user?.provider === "github" ? (
-            user.avatar_url ? (
-              <img
-                src={user.avatar_url}
-                alt={user.login}
-                style={{ width: 32, height: 32, borderRadius: "50%", border: "1px solid var(--line)" }}
-              />
-            ) : (
-              <GitHubIcon size={20} color="var(--accent)" />
-            )
+          {user?.avatar_url ? (
+            <img
+              src={user.avatar_url}
+              alt={user.login}
+              style={{ width: 32, height: 32, borderRadius: "50%", border: "1px solid var(--line)" }}
+            />
           ) : (
-            <User size={20} color="var(--muted)" />
+            <GitHubIcon size={20} color="var(--accent)" />
           )}
           <div style={{ flex: 1, minWidth: 0 }}>
             <strong style={{ display: "block", fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
               {user?.login || "Anonymous"}
             </strong>
             <small style={{ color: "var(--muted)", fontSize: 11 }}>
-              {user?.provider === "github" ? "GitHub" : "Guest"}
+              GitHub
             </small>
           </div>
         </div>
