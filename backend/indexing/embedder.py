@@ -6,7 +6,6 @@ import asyncio
 import hashlib
 from typing import Any
 
-from fastembed import TextEmbedding
 from google import genai
 from google.genai import types
 from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wait_exponential
@@ -40,6 +39,14 @@ class CortexEmbedder:
             self._init_vertex()
 
     def _init_fastembed(self) -> None:
+        try:
+            from fastembed import TextEmbedding
+        except ImportError as exc:
+            raise RuntimeError(
+                "EMBEDDING_BACKEND=fastembed requires fastembed. "
+                "Use EMBEDDING_BACKEND=vertex in production or install local dev requirements."
+            ) from exc
+
         embedding_kwargs = {}
         if self.device == "cuda":
             embedding_kwargs["providers"] = ["CUDAExecutionProvider"]
