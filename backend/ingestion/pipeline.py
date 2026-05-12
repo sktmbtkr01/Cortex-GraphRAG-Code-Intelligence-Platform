@@ -14,6 +14,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from core.config import settings
+from core.cache_limits import enforce_chunk_limit, enforce_eligible_file_limit
 from core.logger import get_logger
 from ingestion.git_source import process_repo_files_via_git_clone_batches
 from ingestion.github_client import GitHubClient
@@ -179,6 +180,7 @@ class IngestionPipeline:
                 timings_ms["file_walk_ms"] = clone_result.file_walk_ms
                 timings_ms["file_read_ms"] = clone_result.file_read_ms
                 stats["files_skipped"] += clone_result.skipped_files
+                enforce_eligible_file_limit(clone_result.eligible_files)
                 await self._emit_progress(
                     progress_cb,
                     "clone_done",
@@ -217,6 +219,7 @@ class IngestionPipeline:
                     else:
                         stats["files_skipped"] += 1
                 mark_timing("filter_ms", stage_started_at)
+                enforce_eligible_file_limit(len(eligible_items))
 
                 await self._emit_progress(
                     progress_cb,
@@ -324,6 +327,7 @@ class IngestionPipeline:
                             c.commit_sha = commit_sha
                             c.ingest_run_id = ingest_run_id
                         stats["chunks_created"] += len(chunks)
+                        enforce_chunk_limit(stats["chunks_created"])
                         pending_chunks.extend(chunks)
                 mark_timing("issues_ms", stage_started_at)
 
@@ -367,6 +371,7 @@ class IngestionPipeline:
                         c.commit_sha = commit_sha
                         c.ingest_run_id = ingest_run_id
                     stats["chunks_created"] += len(chunks)
+                    enforce_chunk_limit(stats["chunks_created"])
                     pending_chunks.extend(chunks)
                 mark_timing("prs_ms", stage_started_at)
                     
@@ -578,6 +583,7 @@ class IngestionPipeline:
             chunks = result["chunks"]
             stats["files_parsed"] += 1
             stats["chunks_created"] += len(chunks)
+            enforce_chunk_limit(stats["chunks_created"])
             stats["files_reindexed"] += 1
             if path in previous_file_shas and path not in reindexed_file_paths:
                 self.vector_store.delete_by_file(repo, path, branch=branch, user_id=user_id)

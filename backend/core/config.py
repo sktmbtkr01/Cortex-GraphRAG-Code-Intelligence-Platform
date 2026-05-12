@@ -21,6 +21,12 @@ class Settings(BaseSettings):
     embedding_cache_dir: str | None = None
     embedding_local_files_only: bool = False
     embedding_device: str = "cpu"
+    vertex_project_id: str | None = None
+    vertex_location: str = "us-central1"
+    vertex_embedding_model: str = "text-embedding-005"
+    vertex_embedding_task_type: str = "RETRIEVAL_DOCUMENT"
+    vertex_embedding_max_text_chars: int = 20_000
+    vertex_embedding_retry_attempts: int = 3
 
     github_pat: str | None = None
     github_webhook_secret: str | None = None
@@ -40,6 +46,21 @@ class Settings(BaseSettings):
     ingest_job_max_events: int = 500
     job_store_backend: str = "memory"
     redis_url: str | None = None
+    session_store_backend: str = "memory"
+    session_ttl_seconds: int = 86_400
+    session_encryption_key: str | None = None
+    cache_backend: str = "redis"
+    github_cache_ttl_seconds: int = 600
+    report_cache_ttl_seconds: int = 86_400
+    quota_backend: str = "redis"
+    max_repos_per_user: int = 2
+    max_eligible_files: int = 500
+    max_chunks_per_repo: int = 3000
+    max_active_ingests_per_user: int = 1
+    max_global_active_ingests: int = 2
+    max_ingests_per_user_per_day: int = 2
+    max_queries_per_user_per_day: int = 30
+    max_health_checks_per_repo_commit: int = 1
 
     # Multi-tenant safety: reject repos larger than this (in MB)
     max_repo_size_mb: int = 500

@@ -19,6 +19,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from core.config import settings
+from core.cache_limits import enforce_eligible_file_limit
 from core.logger import get_logger
 from ingestion.file_router import should_process_file
 
@@ -199,6 +200,7 @@ async def process_repo_files_via_git_clone_batches(
                 continue
             eligible_paths.append((path, rel_path, size))
         file_walk_ms = int((time.perf_counter() - walk_started_at) * 1000)
+        enforce_eligible_file_limit(len(eligible_paths))
 
         total_batches = max(1, (len(eligible_paths) + batch_size - 1) // batch_size)
         batches_processed = 0

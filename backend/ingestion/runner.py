@@ -12,6 +12,7 @@ import uuid
 
 from agents.summarizer import generate_repo_snapshot
 from core.auth import AuthenticatedUser
+from core.cache_limits import active_ingest_lock, cache_set_json, enforce_repo_size_limit, snapshot_cache_key
 from core.config import settings
 from core.job_store import job_store
 from core.logger import get_logger
@@ -149,12 +150,7 @@ async def run_ingest_job(
         async with GitHubClient(token=user.github_token) as client:
             metadata = await client.fetch_repo_metadata(owner, repo_name)
         repo_size_kb = metadata.get("size", 0)
-        repo_size_mb = repo_size_kb / 1024
-        if repo_size_mb > settings.max_repo_size_mb:
-            raise ValueError(
-                f"Repository {request.repo} is too large ({repo_size_mb:.0f} MB). "
-                f"Maximum allowed is {settings.max_repo_size_mb} MB."
-            )
+        enforce_repo_size_limit(repo_size_kb)
 
         default_branch = metadata.get("default_branch") or "main"
         repo_branch_id = _repo_branch_id(request.repo, branch)
@@ -212,24 +208,30 @@ async def run_ingest_job(
                 {"previous_files": len(previous_file_shas)},
             )
 
-        stats = await pipeline.ingest_repo(
-            repo=request.repo,
-            branch=branch,
-            commit_sha=commit_sha,
-            ingest_run_id=ingest_run_id,
-            include_issues=False,
-            include_prs=False,
-            include_commits=False,
-            max_commits=0,
-            user_id=user.user_id,
-            is_public=is_public,
-            previous_file_shas=previous_file_shas,
-            progress_cb=emit_progress,
-        )
+        with active_ingest_lock(user.user_id, job_id):
+            stats = await pipeline.ingest_repo(
+                repo=request.repo,
+                branch=branch,
+                commit_sha=commit_sha,
+                ingest_run_id=ingest_run_id,
+                include_issues=False,
+                include_prs=False,
+                include_commits=False,
+                max_commits=0,
+                user_id=user.user_id,
+                is_public=is_public,
+                previous_file_shas=previous_file_shas,
+                progress_cb=emit_progress,
+            )
 
         await emit_progress("snapshot", "Generating architectural snapshot")
         snapshot_started_at = time.perf_counter()
         snapshot = await generate_repo_snapshot(request.repo, user.user_id, branch=branch)
+        cache_set_json(
+            snapshot_cache_key(user.user_id, request.repo, branch, commit_sha),
+            {"repo": request.repo, "snapshot": snapshot},
+            settings.report_cache_ttl_seconds,
+        )
         stats.setdefault("timings_ms", {})["snapshot_ms"] = int(
             (time.perf_counter() - snapshot_started_at) * 1000
         )

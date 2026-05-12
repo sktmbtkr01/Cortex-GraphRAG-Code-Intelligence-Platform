@@ -469,7 +469,51 @@ Verification:
 
 ---
 
-## 8. Stage Timing And Instrumentation
+## 8. Redis Cache And Demo Limits
+
+Status: implemented locally for production-beta validation.
+
+What changed:
+
+- Added `backend/core/cache_limits.py`.
+- Added Redis JSON cache helpers for GitHub repo lists, GitHub branch lists, snapshots, and health reports.
+- Added Redis-backed daily counters for ingests, queries, and health checks.
+- Added Redis-backed active ingest locks for one active ingest per user and a small global active ingest cap.
+- Added guardrails for indexed repo count, repository size, eligible file count, and chunk count.
+- Added cache/quota settings to `backend/core/config.py` and `.env.example`.
+- Startup logs now include cache and quota backend settings.
+
+Current cached data:
+
+```text
+github_repos:<hashed_user_id>
+github_branches:<hashed_user_id>:<hashed_repo>
+snapshot:<hashed_user_id>:<hashed_repo>:<branch>:<commit_sha>
+health:<hashed_user_id>:<hashed_repo>:<branch>:<commit_sha>
+```
+
+Current limits:
+
+```text
+MAX_REPOS_PER_USER
+MAX_ELIGIBLE_FILES
+MAX_CHUNKS_PER_REPO
+MAX_ACTIVE_INGESTS_PER_USER
+MAX_GLOBAL_ACTIVE_INGESTS
+MAX_INGESTS_PER_USER_PER_DAY
+MAX_QUERIES_PER_USER_PER_DAY
+MAX_HEALTH_CHECKS_PER_REPO_COMMIT
+```
+
+`MAX_REPOS_PER_USER` counts indexed repo-branches, not unique repository names. For example, indexing `owner/api@main` and `owner/api@dev` consumes two slots.
+
+Verification:
+
+- Passed: `python -m py_compile backend\core\cache_limits.py backend\core\config.py backend\api\routes.py backend\ingestion\runner.py backend\ingestion\pipeline.py backend\ingestion\git_source.py backend\main.py`
+
+---
+
+## 9. Stage Timing And Instrumentation
 
 Add timings for ingestion stages:
 
@@ -502,7 +546,7 @@ Which stage dominates?
 
 ---
 
-## 9. Keep The Existing Retrieval Design
+## 10. Keep The Existing Retrieval Design
 
 These changes are about ingestion architecture, not changing the main retrieval product behavior.
 
@@ -516,6 +560,32 @@ Keep:
 - direct semantic route plus graph/hybrid route plus LangGraph agent route.
 
 Expected output should remain compatible with current frontend source citations.
+
+---
+
+## 11. Vertex Embedding Backend
+
+Status: implemented locally behind `EMBEDDING_BACKEND=vertex`.
+
+What changed:
+
+- `CortexEmbedder` now supports both `fastembed` and `vertex`.
+- Local development can continue using FastEmbed/GPU.
+- Production can use Vertex AI embeddings without changing ingestion, query, health, snapshot, or agent callers.
+- The dense vector interface remains `embed_batch(texts) -> list[list[float]]`.
+- Sparse vector generation remains local.
+- Vertex requests are batched and retried with exponential backoff.
+- Returned vector dimensions are validated before Qdrant upsert/search.
+
+Required production env:
+
+```env
+EMBEDDING_BACKEND=vertex
+VERTEX_PROJECT_ID=<google-cloud-project-id>
+VERTEX_LOCATION=us-central1
+VERTEX_EMBEDDING_MODEL=text-embedding-005
+EMBEDDING_DIMENSIONS=768
+```
 
 ---
 

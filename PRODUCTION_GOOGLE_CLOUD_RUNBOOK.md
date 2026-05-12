@@ -183,7 +183,6 @@ Recommended initial demo limits:
 ```env
 ACCESS_MODE=open_limited
 MAX_REPOS_PER_USER=2
-MAX_BRANCHES_PER_REPO=1
 MAX_REPO_SIZE_MB=50
 MAX_ELIGIBLE_FILES=500
 MAX_CHUNKS_PER_REPO=3000
@@ -235,7 +234,9 @@ The stronger beta architecture keeps long-running ingestion out of the API proce
 
 ### 6.2 Add Vertex Embedding Backend
 
-Current embedder supports only FastEmbed. Production needs:
+Current embedder supports FastEmbed for local development. Production should use Vertex:
+
+Status: implemented locally as a backend switch inside `CortexEmbedder`.
 
 ```env
 EMBEDDING_BACKEND=vertex
@@ -262,6 +263,15 @@ Required behavior:
 - Validate returned vector dimension equals `EMBEDDING_DIMENSIONS`.
 - Fail ingestion clearly if dimensions mismatch the Qdrant collection.
 
+Implementation progress:
+
+- Added `EMBEDDING_BACKEND=fastembed|vertex`.
+- Added `VERTEX_PROJECT_ID`, `VERTEX_LOCATION`, `VERTEX_EMBEDDING_MODEL`, `VERTEX_EMBEDDING_TASK_TYPE`, `VERTEX_EMBEDDING_MAX_TEXT_CHARS`, and `VERTEX_EMBEDDING_RETRY_ATTEMPTS`.
+- `CortexEmbedder.embed_batch(...)` now preserves the same caller-facing interface for both local FastEmbed and Vertex.
+- Vertex requests are batched with a maximum of 250 inputs per request.
+- Vertex responses are dimension-checked against `EMBEDDING_DIMENSIONS`.
+- Sparse vectors still remain local.
+
 Recommended batching rules:
 
 - Max 250 texts per embedding request.
@@ -271,6 +281,8 @@ Recommended batching rules:
 ### 6.3 Add Durable Session Store
 
 Current GitHub access tokens live in memory. Production needs durable server-side storage.
+
+Status: implemented locally with Redis-backed encrypted GitHub token storage and 24-hour TTL.
 
 Recommended shape:
 
@@ -286,6 +298,16 @@ Requirements:
 - Logout deletes the Redis session key.
 - Backend restart does not immediately log users out.
 - Expired session returns a clear "sign in again" response.
+
+Implementation progress:
+
+- Added `SESSION_STORE_BACKEND=memory|redis`.
+- Added `SESSION_TTL_SECONDS`.
+- Added `SESSION_ENCRYPTION_KEY`.
+- Redis session keys store encrypted GitHub tokens only.
+- Session keys are hashed by user id.
+- Logout clears the Redis session key and HttpOnly cookie.
+- Startup logs now show the active job/session backends.
 
 Encryption recommendation:
 
@@ -382,6 +404,8 @@ This reduces peak memory from "all eligible file contents plus all chunks plus a
 
 Caching is required to reduce cost and avoid repeated expensive calls.
 
+Status: implemented locally with Redis-backed JSON caches for GitHub repository lists, GitHub branch lists, snapshots, and health reports.
+
 Cache these:
 
 ```text
@@ -403,14 +427,25 @@ Rules:
 - Do not cache raw GitHub tokens outside the encrypted session store.
 - Do not cache raw LLM prompts.
 
+Implementation progress:
+
+- Added `CACHE_BACKEND=redis`.
+- Added `GITHUB_CACHE_TTL_SECONDS`.
+- Added `REPORT_CACHE_TTL_SECONDS`.
+- GitHub repo and branch dropdown calls now use short-lived Redis cache entries.
+- Snapshot and health report cache keys include user, repo, branch, and commit SHA.
+- Health generation returns the cached report for repeated requests on the same commit.
+- Snapshot generation writes a Redis cache entry after ingestion and refreshes it on snapshot reads.
+
 ### 6.7 Add Hard Limit Enforcement
 
 Add a small quota/limits service used by ingestion and query routes.
 
+Status: implemented locally with Redis-backed daily counters and active ingest locks.
+
 The service should check:
 
-- User repo count.
-- User branch count.
+- User indexed repo-branch count.
 - User daily ingest count.
 - User daily query count.
 - Active user ingest lock.
@@ -431,6 +466,18 @@ The limit service should return structured errors:
 ```
 
 The frontend should display the message without crashing.
+
+Implementation progress:
+
+- Added `QUOTA_BACKEND=redis`.
+- Added demo limits for repo count, eligible files, chunks, active ingests, daily ingests, daily queries, and health generation per commit.
+- Repo count means indexed repo-branch count. Two branches from the same GitHub repo consume two slots.
+- Ingest creation checks daily ingest quota and per-user repo count before queuing a job.
+- Update jobs check daily ingest quota before queuing.
+- The ingestion runner uses a Redis active-ingest lock per user plus a global active-ingest counter.
+- Ingestion enforces repository size, eligible file count, and chunk count.
+- Query routes enforce daily query quota.
+- Health checks are limited to one generation per repo/branch/commit, then served from Redis cache.
 
 ### 6.8 Add Privacy Notice And Consent
 

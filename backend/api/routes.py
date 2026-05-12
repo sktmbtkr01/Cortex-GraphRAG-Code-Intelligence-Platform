@@ -36,6 +36,18 @@ from agents.tools import get_call_graph, get_dependencies, set_agent_user_contex
 from ingestion.github_client import GitHubClient
 from ingestion.runner import run_ingest_job
 from core.job_store import job_store
+from core.cache_limits import (
+    cache_get_json,
+    cache_set_json,
+    check_daily_health_quota,
+    check_daily_ingest_quota,
+    check_daily_query_quota,
+    enforce_repo_count_limit,
+    github_branches_cache_key,
+    github_repos_cache_key,
+    health_cache_key,
+    snapshot_cache_key,
+)
 from core.tenant import tenant_scoped_id
 
 
@@ -208,6 +220,23 @@ async def ingest_repo(
     except ValueError:
         raise HTTPException(status_code=400, detail="Repo must be 'owner/repo' format")
 
+    neo4j = Neo4jManager()
+    requested_branch = request.branch or "main"
+    existing_rows = neo4j.run_query(
+        "MATCH (r:Repository) WHERE r.user_id = $user_id "
+        "WITH count(DISTINCT r.id) AS count "
+        "OPTIONAL MATCH (existing:Repository {full_name: $repo}) "
+        "WHERE existing.user_id = $user_id "
+        "AND coalesce(existing.branch, existing.default_branch, 'main') = $branch "
+        "RETURN count, count(existing) AS existing_repo_count",
+        {"user_id": user.user_id, "repo": request.repo, "branch": requested_branch},
+    )
+    existing_count = int((existing_rows[0] if existing_rows else {}).get("count", 0) or 0)
+    existing_repo_count = int((existing_rows[0] if existing_rows else {}).get("existing_repo_count", 0) or 0)
+    if existing_repo_count == 0:
+        enforce_repo_count_limit(existing_count)
+    check_daily_ingest_quota(user.user_id)
+
     job_id = job_store.create_job(user_id=user.user_id, repo=request.repo)
     asyncio.create_task(run_ingest_job(job_id=job_id, request=request, user=user))
 
@@ -215,8 +244,8 @@ async def ingest_repo(
         job_id=job_id,
         status="accepted",
         repo=request.repo,
-        branch=request.branch or "main",
-        message=f"Ingestion started in background for {request.repo} @ {request.branch or 'main'}",
+        branch=requested_branch,
+        message=f"Ingestion started in background for {request.repo} @ {requested_branch}",
     )
 
 
@@ -256,6 +285,7 @@ async def update_repo_branch(
                 message=f"{full_name} @ {branch} is already up to date",
             )
 
+        check_daily_ingest_quota(user.user_id)
         job_id = job_store.create_job(user_id=user.user_id, repo=full_name)
         request = IngestRequest(
             repo=full_name,
@@ -443,9 +473,14 @@ async def list_repo_branches(
 ) -> list[dict[str, object]]:
     """List branches for a GitHub repository the user can access."""
     try:
+        cache_key = github_branches_cache_key(user.user_id, f"{owner}/{repo_name}")
+        cached = cache_get_json(cache_key)
+        if cached is not None:
+            return cached
+
         async with GitHubClient(token=user.github_token) as github:
             branches = await github.fetch_branches(owner, repo_name)
-        return [
+        response = [
             {
                 "name": b.get("name"),
                 "commit_sha": (b.get("commit") or {}).get("sha"),
@@ -453,6 +488,8 @@ async def list_repo_branches(
             for b in branches
             if b.get("name")
         ]
+        cache_set_json(cache_key, response, settings.github_cache_ttl_seconds)
+        return response
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -468,10 +505,15 @@ async def list_my_github_repos(
                 status_code=401,
                 detail="GitHub session expired. Sign in again to access repositories.",
             )
+        cache_key = github_repos_cache_key(user.user_id)
+        cached = cache_get_json(cache_key)
+        if cached is not None:
+            return cached
+
         async with GitHubClient(token=user.github_token) as github:
             repos = await github.list_user_repos(max_repos=200)
 
-        return [
+        response = [
             {
                 "name": r.get("name"),
                 "full_name": r.get("full_name"),
@@ -483,6 +525,8 @@ async def list_my_github_repos(
             for r in repos
             if r.get("full_name")
         ]
+        cache_set_json(cache_key, response, settings.github_cache_ttl_seconds)
+        return response
     except HTTPException:
         raise
     except Exception as e:
@@ -627,6 +671,7 @@ async def query(
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> QueryResponse:
     """Direct RAG query, scoped to the user's accessible repos."""
+    check_daily_query_quota(user.user_id)
     pipeline = RAGPipeline()
     try:
         result = await pipeline.query(
@@ -649,6 +694,7 @@ async def agent_query(
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> QueryResponse:
     """Auto-routed query with visible retrieval/tool trace."""
+    check_daily_query_quota(user.user_id)
     route = _route_query_intent(request.query)
     try:
         graph_intent = _graph_tool_intent(request.query)
@@ -1029,7 +1075,8 @@ async def get_repo_snapshot(
             "WHERE (r.user_id = $user_id OR r.is_public = true) "
             "AND ($branch IS NULL OR coalesce(r.branch, r.default_branch, 'main') = $branch) "
             "OPTIONAL MATCH (s:Snapshot {id: $snapshot_id}) "
-            "RETURN coalesce(s.snapshot, r.snapshot) AS snapshot",
+            "RETURN coalesce(s.snapshot, r.snapshot) AS snapshot, "
+            "r.commit_sha AS commit_sha",
             {
                 "repo": full_name,
                 "branch": branch,
@@ -1041,10 +1088,21 @@ async def get_repo_snapshot(
         if not access_check:
             raise HTTPException(status_code=403, detail="Repository not found or access denied")
             
+        commit_sha = access_check[0].get("commit_sha")
+        cache_key = snapshot_cache_key(user.user_id, full_name, branch_name, commit_sha)
+        cached_snapshot = cache_get_json(cache_key)
+        if cached_snapshot and cached_snapshot.get("snapshot"):
+            return SnapshotResponse(repo=full_name, snapshot=str(cached_snapshot["snapshot"]))
+
         snapshot = access_check[0].get("snapshot")
         if not snapshot:
             return SnapshotResponse(repo=full_name, snapshot="Snapshot not available yet. Please allow a few minutes after ingestion.")
-            
+
+        cache_set_json(
+            cache_key,
+            {"repo": full_name, "snapshot": snapshot},
+            settings.report_cache_ttl_seconds,
+        )
         return SnapshotResponse(repo=full_name, snapshot=snapshot)
     except HTTPException:
         raise
@@ -1077,6 +1135,17 @@ async def _run_repo_health_check(
 
         repo_record = repo_rows[0]
         commit_sha = repo_record.get("commit_sha")
+        cached_health = cache_get_json(health_cache_key(user.user_id, full_name, branch_name, commit_sha))
+        if cached_health:
+            cached_signals = cached_health.get("signals") or {}
+            cached_signals["cache"] = "redis"
+            return HealthCheckResponse(
+                repo=full_name,
+                branch=branch_name,
+                report=str(cached_health.get("report") or ""),
+                signals=cached_signals,
+            )
+        check_daily_health_quota(user.user_id, full_name, branch_name, commit_sha)
 
         node_rows = neo4j.run_query(
             "MATCH (n) WHERE (n.repo = $repo OR n.full_name = $repo) "
@@ -1192,6 +1261,17 @@ async def _run_repo_health_check(
             ),
         )
         final_answer = response.text or "No report generated."
+        signals["cache"] = "miss"
+        cache_set_json(
+            health_cache_key(user.user_id, full_name, branch_name, commit_sha),
+            {
+                "repo": full_name,
+                "branch": branch_name,
+                "report": final_answer,
+                "signals": signals,
+            },
+            settings.report_cache_ttl_seconds,
+        )
         neo4j.run_query(
             "MATCH (r:Repository {full_name: $repo}) "
             "WHERE (r.user_id = $user_id OR r.is_public = true) "
