@@ -270,7 +270,8 @@ Implementation progress:
 - `CortexEmbedder.embed_batch(...)` now preserves the same caller-facing interface for both local FastEmbed and Vertex.
 - Vertex requests are batched with a maximum of 250 inputs per request.
 - Vertex responses are dimension-checked against `EMBEDDING_DIMENSIONS`.
-- Vertex embedding input text is hard-capped at 8,000 characters per chunk to avoid token-limit failures on dense source code.
+- Vertex embedding input text is hard-capped at 4,000 characters per chunk to avoid token-limit failures on dense source code.
+- Vertex embedding request batches are split by an aggregate character budget, not only by item count.
 - Vertex embedding requests are rate-spaced and 429 quota errors retry after a longer wait.
 - Sparse vectors still remain local.
 
@@ -304,7 +305,8 @@ Why:
 Recommended batching rules:
 
 - Max 250 texts per embedding request.
-- Keep `VERTEX_EMBEDDING_MAX_TEXT_CHARS=8000` unless production logs show a safe reason to raise it.
+- Keep `VERTEX_EMBEDDING_MAX_TEXT_CHARS=4000` unless production logs show a safe reason to raise it.
+- Keep `VERTEX_EMBEDDING_MAX_REQUEST_CHARS=12000` so a large batch does not exceed the model's total request token limit.
 - Keep `VERTEX_EMBEDDING_MIN_REQUEST_INTERVAL_SECONDS=13` for a 5-request/minute quota.
 - Keep `VERTEX_EMBEDDING_QUOTA_RETRY_SECONDS=65` so a quota hit waits for the next minute window.
 - Truncate or pre-chunk text so each input stays under the model's effective per-input limit.

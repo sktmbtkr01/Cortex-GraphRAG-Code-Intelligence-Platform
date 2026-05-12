@@ -89,17 +89,47 @@ class CortexEmbedder:
         # Vertex embedding limits are token-based, and dense code can tokenize
         # much heavier than prose. Keep a conservative hard cap even if an env
         # var is accidentally left at the model's nominal token limit.
-        max_chars = min(settings.vertex_embedding_max_text_chars, 8_000)
+        max_chars = min(settings.vertex_embedding_max_text_chars, 4_000)
         if max_chars <= 0 or len(text) <= max_chars:
             return text
         return text[:max_chars]
+
+    def _vertex_request_batches(self, texts: list[str]) -> list[list[str]]:
+        max_items = min(max(1, self.batch_size), 250)
+        max_chars = max(1, settings.vertex_embedding_max_request_chars)
+        batches: list[list[str]] = []
+        current_batch: list[str] = []
+        current_chars = 0
+
+        for text in texts:
+            truncated = self._truncate_for_vertex(text)
+            text_chars = len(truncated)
+            should_flush = (
+                current_batch
+                and (
+                    len(current_batch) >= max_items
+                    or current_chars + text_chars > max_chars
+                )
+            )
+            if should_flush:
+                batches.append(current_batch)
+                current_batch = []
+                current_chars = 0
+
+            current_batch.append(truncated)
+            current_chars += text_chars
+
+        if current_batch:
+            batches.append(current_batch)
+
+        return batches
 
     def _embed_vertex_sync_once(self, texts: list[str]) -> list[list[float]]:
         if self.client is None:
             raise RuntimeError("Vertex embedding client is not initialized.")
         response = self.client.models.embed_content(
             model=self.model,
-            contents=[self._truncate_for_vertex(text) for text in texts],
+            contents=texts,
             config=types.EmbedContentConfig(
                 task_type=settings.vertex_embedding_task_type,
                 output_dimensionality=self.dimensions,
@@ -177,9 +207,14 @@ class CortexEmbedder:
             raise RuntimeError("Vertex embedding request failed without an exception.")
 
         dense_vectors: list[list[float]] = []
-        request_batch_size = min(max(1, self.batch_size), 250)
-        for offset in range(0, len(texts), request_batch_size):
-            dense_vectors.extend(call_vertex(texts[offset : offset + request_batch_size]))
+        batches = self._vertex_request_batches(texts)
+        logger.info(
+            "Split %s texts into %s Vertex embedding requests.",
+            len(texts),
+            len(batches),
+        )
+        for batch in batches:
+            dense_vectors.extend(call_vertex(batch))
         return dense_vectors
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
