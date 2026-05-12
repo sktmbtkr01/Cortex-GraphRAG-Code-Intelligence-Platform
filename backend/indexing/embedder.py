@@ -4,16 +4,18 @@ Cortex Embedder - Handles dense + sparse embedding generation.
 
 import asyncio
 import hashlib
+import time
 from typing import Any
 
 from google import genai
 from google.genai import types
-from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 
 from core.config import settings
 from core.logger import get_logger
 
 logger = get_logger(__name__)
+
+_last_vertex_embedding_request_at = 0.0
 
 
 class CortexEmbedder:
@@ -111,17 +113,68 @@ class CortexEmbedder:
             )
         return self._validate_dimensions(dense_vectors)
 
+    def _wait_for_vertex_quota_slot(self) -> None:
+        global _last_vertex_embedding_request_at
+
+        interval = max(0.0, settings.vertex_embedding_min_request_interval_seconds)
+        if interval <= 0:
+            return
+
+        now = time.monotonic()
+        wait_seconds = interval - (now - _last_vertex_embedding_request_at)
+        if wait_seconds > 0:
+            logger.info(
+                "Waiting %.1fs before next Vertex embedding request to respect quota.",
+                wait_seconds,
+            )
+            time.sleep(wait_seconds)
+        _last_vertex_embedding_request_at = time.monotonic()
+
+    def _is_vertex_quota_error(self, exc: Exception) -> bool:
+        text = str(exc).lower()
+        return (
+            "429" in text
+            or "resource_exhausted" in text
+            or "quota exceeded" in text
+            or "online_prediction_requests_per_base_model" in text
+        )
+
     def _embed_vertex_sync(self, texts: list[str]) -> list[list[float]]:
         attempts = max(1, settings.vertex_embedding_retry_attempts)
 
-        @retry(
-            reraise=True,
-            stop=stop_after_attempt(attempts),
-            wait=wait_exponential(multiplier=1, min=1, max=10),
-            retry=retry_if_not_exception_type(ValueError),
-        )
         def call_vertex(batch: list[str]) -> list[list[float]]:
-            return self._embed_vertex_sync_once(batch)
+            last_error: Exception | None = None
+            for attempt in range(1, attempts + 1):
+                try:
+                    self._wait_for_vertex_quota_slot()
+                    return self._embed_vertex_sync_once(batch)
+                except ValueError:
+                    raise
+                except Exception as exc:
+                    last_error = exc
+                    if attempt >= attempts:
+                        break
+
+                    if self._is_vertex_quota_error(exc):
+                        wait_seconds = max(
+                            settings.vertex_embedding_quota_retry_seconds,
+                            settings.vertex_embedding_min_request_interval_seconds,
+                        )
+                    else:
+                        wait_seconds = min(10.0, 2.0 ** (attempt - 1))
+
+                    logger.warning(
+                        "Vertex embedding request failed on attempt %s/%s; retrying in %.1fs: %s",
+                        attempt,
+                        attempts,
+                        wait_seconds,
+                        exc,
+                    )
+                    time.sleep(wait_seconds)
+
+            if last_error is not None:
+                raise last_error
+            raise RuntimeError("Vertex embedding request failed without an exception.")
 
         dense_vectors: list[list[float]] = []
         request_batch_size = min(max(1, self.batch_size), 250)

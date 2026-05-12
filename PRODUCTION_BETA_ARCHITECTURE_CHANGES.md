@@ -578,6 +578,7 @@ What changed:
 - Vertex requests are batched and retried with exponential backoff.
 - Returned vector dimensions are validated before Qdrant upsert/search.
 - Vertex embedding input text is conservatively capped at 8,000 characters per chunk because the model limit is token-based and code can tokenize much denser than prose.
+- Vertex embedding requests are spaced by a configurable interval and 429 quota errors wait before retrying, so ingestion slows down instead of failing against low request-per-minute quotas.
 
 Required production env:
 
@@ -588,6 +589,8 @@ VERTEX_LOCATION=us-central1
 VERTEX_EMBEDDING_MODEL=text-embedding-005
 EMBEDDING_DIMENSIONS=768
 VERTEX_EMBEDDING_MAX_TEXT_CHARS=8000
+VERTEX_EMBEDDING_MIN_REQUEST_INTERVAL_SECONDS=13
+VERTEX_EMBEDDING_QUOTA_RETRY_SECONDS=65
 ```
 
 ---

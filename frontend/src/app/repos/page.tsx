@@ -105,6 +105,28 @@ function upsertIngestEvent(
   return [...events.filter((item) => item.stage !== next.stage), next];
 }
 
+function formatApiError(error: unknown, fallback = "Request failed.") {
+  if (!error) return fallback;
+  if (typeof error === "string") return error;
+  if (typeof error === "number" || typeof error === "boolean") return String(error);
+  if (Array.isArray(error)) {
+    return error
+      .map((item) => formatApiError(item, ""))
+      .filter(Boolean)
+      .join("; ") || fallback;
+  }
+  if (typeof error === "object") {
+    const record = error as Record<string, unknown>;
+    return (
+      formatApiError(record.detail, "") ||
+      formatApiError(record.message, "") ||
+      formatApiError(record.error, "") ||
+      JSON.stringify(record)
+    );
+  }
+  return fallback;
+}
+
 export default function ReposPage() {
   const API_URL = getApiUrl();
   const { authHeaders } = useAuth();
@@ -400,9 +422,15 @@ export default function ReposPage() {
           max_commits: 100,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) alert("Error: " + data.detail);
-      else {
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const message = formatApiError(data, `Failed to start ingest (${res.status}).`);
+        alert(`Error: ${message}`);
+        setIngestStatus(`Ingest failed: ${message}`);
+        setLoading(false);
+        ingestActiveRef.current = false;
+        return;
+      } else {
         setIngestStatus(`Job queued: ${data.job_id}`);
 
         closeStream();
@@ -464,7 +492,7 @@ export default function ReposPage() {
         void fetchRepos();
         alert(`Repository delete was incomplete. Graph remaining: ${data.graph_remaining ?? "unknown"}, Qdrant remaining: ${data.qdrant_remaining ?? "unknown"}.`);
       } else {
-        alert(data.detail || "Failed to delete repository.");
+        alert(formatApiError(data, "Failed to delete repository."));
       }
     } catch (e) {
       alert("Error reaching backend.");
@@ -490,9 +518,9 @@ export default function ReposPage() {
         });
         const retryData = await retry.json();
         if (retry.ok) setDrawerContent(retryData.snapshot);
-        else setDrawerContent(`Error: ${retryData.detail || "Failed to regenerate snapshot."}`);
+        else setDrawerContent(`Error: ${formatApiError(retryData, "Failed to regenerate snapshot.")}`);
       }
-      else setDrawerContent(`Error: ${data.detail}`);
+      else setDrawerContent(`Error: ${formatApiError(data, `Failed to load snapshot (${res.status}).`)}`);
     } catch (e) {
       setDrawerContent("Failed to connect to backend.");
     } finally {
