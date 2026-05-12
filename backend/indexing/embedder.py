@@ -66,7 +66,10 @@ class CortexEmbedder:
     def _init_gemini_api(self) -> None:
         if not settings.gemini_api_key:
             raise ValueError("GEMINI_API_KEY is required when EMBEDDING_BACKEND=gemini_api.")
-        self.client = genai.Client(api_key=settings.gemini_api_key)
+        self.client = genai.Client(
+            api_key=settings.gemini_api_key,
+            http_options={"api_version": "v1"},
+        )
 
     def _init_vertex(self) -> None:
         if not settings.vertex_project_id:
