@@ -11,6 +11,7 @@ import GlobalBrainBar from "@/components/GlobalBrainBar";
 import SearchableSelect from "@/components/ui/searchable-select";
 import { openIngestEventStream, type IngestStreamEvent } from "@/app/utils/sse";
 import ConfirmDialog from "@/components/ConfirmDialog";
+import { getApiUrl } from "@/app/utils/api-url";
 
 interface Repo {
   repo: string;
@@ -105,7 +106,7 @@ function upsertIngestEvent(
 }
 
 export default function ReposPage() {
-  const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+  const API_URL = getApiUrl();
   const { authHeaders } = useAuth();
 
   const [repos, setRepos] = useState<Repo[]>([]);

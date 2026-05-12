@@ -3,6 +3,7 @@
 import React, { useEffect, useState } from "react";
 import { Brain, Boxes, Network, GitBranch } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
+import { getApiUrl } from "@/app/utils/api-url";
 
 type GlobalStats = {
   chunks: number;
@@ -20,7 +21,7 @@ const EMPTY_STATS: GlobalStats = {
 
 export default function GlobalBrainBar() {
   const { authHeaders } = useAuth();
-  const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+  const API_URL = getApiUrl();
   const [stats, setStats] = useState<GlobalStats>(EMPTY_STATS);
 
   useEffect(() => {

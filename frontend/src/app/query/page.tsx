@@ -6,6 +6,7 @@ import { Code2, FileText, GitBranch, LoaderCircle, MessageSquare, Route, Search,
 import MarkdownMessage from "@/components/MarkdownMessage";
 import { useAuth } from "@/context/AuthContext";
 import { ShiningText } from "@/components/ui/shining-text";
+import { getApiUrl } from "@/app/utils/api-url";
 
 type SourceChunk = {
   text: string;
@@ -91,7 +92,7 @@ function retrievalStatusLabel(msg: ChatMessage) {
 }
 
 export default function QueryPage() {
-  const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+  const API_URL = getApiUrl();
   const { authHeaders, user } = useAuth();
   const searchParams = useSearchParams();
   const [messages, setMessages] = useState<ChatMessage[]>([emptyAssistant]);

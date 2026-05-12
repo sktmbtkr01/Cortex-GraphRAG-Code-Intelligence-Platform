@@ -5,6 +5,7 @@ import dynamic from "next/dynamic";
 import { Crosshair, Info, LoaderCircle, Search } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import SearchableSelect from "@/components/ui/searchable-select";
+import { getApiUrl } from "@/app/utils/api-url";
 
 // Dynamically import ForceGraph3D to prevent SSR issues
 const ForceGraph3D = dynamic(() => import("react-force-graph-3d"), { ssr: false });
@@ -39,7 +40,7 @@ interface GraphLink {
 }
 
 export default function GraphViewer() {
-  const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+  const API_URL = getApiUrl();
   const { authHeaders } = useAuth();
   const [graphData, setGraphData] = useState<{ nodes: GraphNode[]; links: GraphLink[] }>({ nodes: [], links: [] });
   const [loading, setLoading] = useState(false);
