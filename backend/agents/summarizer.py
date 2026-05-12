@@ -6,7 +6,7 @@ Generates an instant architectural snapshot after ingestion by:
 2. Retrieving the repo's README from Qdrant
 3. Feeding both to an LLM for a concise, zero-BS summary
 
-The snapshot is stored on the Repository node in Neo4j.
+The snapshot is stored separately from graph visualization metadata.
 """
 
 from core.config import settings
@@ -23,7 +23,7 @@ async def generate_repo_snapshot(repo: str, user_id: str | None = None, branch: 
     """
     Generate an instant architectural snapshot for a repository.
     
-    Returns the snapshot text, also stores it on the Neo4j Repository node.
+    Returns the snapshot text, also stores it in Neo4j outside Repository node metadata.
     """
     try:
         neo4j = Neo4jManager()
@@ -129,7 +129,10 @@ async def generate_repo_snapshot(repo: str, user_id: str | None = None, branch: 
     
     # ── 6. Build context for the LLM ────────────────────────────────
     context = f"Repository: {repo}\nBranch: {branch}\n\n"
-    
+
+    if readme_text:
+        context += f"## README / Project Description (primary orientation source)\n{readme_text}\n"
+
     context += "## Graph Statistics\n"
     for label, count in stats_dict.items():
         context += f"- {label}: {count}\n"
@@ -145,9 +148,6 @@ async def generate_repo_snapshot(repo: str, user_id: str | None = None, branch: 
     context += "\n## External Dependencies\n"
     for d in dependencies:
         context += f"- {d['name']} ({d.get('ecosystem', 'unknown')})\n"
-    
-    if readme_text:
-        context += f"\n## README (excerpt)\n{readme_text}\n"
 
     # ── 7. Generate snapshot via LLM ─────────────────────────────────
     try:
@@ -157,11 +157,14 @@ async def generate_repo_snapshot(repo: str, user_id: str | None = None, branch: 
         client = genai.Client(api_key=settings.gemini_api_key)
         
         system_prompt = (
-            "You are an expert software architect. Generate a concise architectural snapshot "
-            "of the repository based on the provided graph metrics and README. "
-            "Include: overall purpose, tech stack, core modules/entry points, "
-            "heavily coupled components (potential risks), and key dependencies. "
-            "Be direct and useful. No fluff. Use bullet points. Max 400 words."
+            "You are Cortex's architecture snapshot writer. Create a repo orientation brief, "
+            "not a health review and not a security audit. Rely first on the README/project "
+            "description when it is present, then use graph statistics to ground the repo's "
+            "shape. Include these Markdown sections: 1. What This Project Is, 2. Tech Stack, "
+            "3. Global Brain Stats, 4. Core Files And Entry Points, 5. Key Dependencies, "
+            "6. How To Read This Repo First. Keep it concise, descriptive, and useful. "
+            "Mention uncertainty when the README or graph evidence is thin. Do not make risk "
+            "or vulnerability claims here; save review language for the health check. Max 450 words."
         )
         
         response = await client.aio.models.generate_content(
@@ -178,11 +181,27 @@ async def generate_repo_snapshot(repo: str, user_id: str | None = None, branch: 
         # Fallback: return the raw metrics
         snapshot = f"**Auto-generated snapshot (raw metrics)**\n\n{context}"
     
-    # ── 8. Store snapshot on the Repository node ─────────────────────
+    # ── 8. Store snapshot outside Repository graph metadata ──────────
     try:
+        snapshot_id = f"{repo_branch_id}::snapshot"
+        scoped_snapshot_id = tenant_scoped_id(snapshot_id, user_id)
         neo4j.run_query(
-            "MATCH (r:Repository {id: $repo_id}) SET r.snapshot = $snapshot",
-            {"repo_id": scoped_repo_id, "snapshot": snapshot},
+            "MERGE (s:Snapshot {id: $snapshot_id}) "
+            "SET s.raw_id = $raw_id, s.repo = $repo, s.branch = $branch, "
+            "s.user_id = $user_id, s.snapshot = $snapshot, s.updated_at = datetime() "
+            "WITH s "
+            "MATCH (r:Repository {id: $repo_id}) "
+            "REMOVE r.snapshot "
+            "RETURN s.id AS id",
+            {
+                "snapshot_id": scoped_snapshot_id,
+                "raw_id": snapshot_id,
+                "repo": repo,
+                "branch": branch,
+                "user_id": user_id,
+                "snapshot": snapshot,
+                "repo_id": scoped_repo_id,
+            },
         )
         logger.info(f"Stored architectural snapshot for {repo}")
     except Exception as e:

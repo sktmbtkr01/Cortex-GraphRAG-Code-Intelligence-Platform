@@ -14,6 +14,34 @@ from core.tenant import tenant_scoped_id
 
 logger = get_logger(__name__)
 
+SUPPORTED_NODE_LABELS = {
+    "Repository",
+    "File",
+    "Function",
+    "Class",
+    "Issue",
+    "PullRequest",
+    "Commit",
+    "Contributor",
+    "Dependency",
+    "Module",
+    "Label",
+}
+
+SUPPORTED_REL_TYPES = {
+    "CONTAINS",
+    "IMPORTS",
+    "DEFINED_IN",
+    "INHERITS_FROM",
+    "CALLS",
+    "DEPENDS_ON",
+    "MENTIONS",
+    "AUTHORED",
+    "MODIFIES",
+    "HAS_LABEL",
+    "REFERENCES",
+}
+
 
 class Neo4jManager:
     """Manages the Neo4j AuraDB graph database connection and schema."""
@@ -168,3 +196,71 @@ class Neo4jManager:
             rel_type,
             properties,
         )
+
+    def merge_tenant_nodes_batch(
+        self,
+        label: str,
+        nodes: list[dict[str, Any]],
+        user_id: str | None,
+        is_public: bool = False,
+    ) -> None:
+        """Merge many tenant-scoped nodes with one Neo4j round trip."""
+        if not nodes:
+            return
+        if label not in SUPPORTED_NODE_LABELS:
+            raise ValueError(f"Unsupported Neo4j node label: {label}")
+
+        rows = []
+        for node in nodes:
+            raw_id = node["raw_id"]
+            properties = dict(node.get("properties") or {})
+            rows.append(
+                {
+                    "id": self.scoped_id(raw_id, user_id, is_public),
+                    "props": {
+                        **properties,
+                        "raw_id": raw_id,
+                        "user_id": user_id,
+                        "is_public": is_public,
+                    },
+                }
+            )
+
+        query = f"""
+        UNWIND $rows AS row
+        MERGE (n:{label} {{id: row.id}})
+        SET n += row.props
+        """
+        self.run_query(query, {"rows": rows})
+
+    def merge_tenant_relationships_batch(
+        self,
+        rel_type: str,
+        relationships: list[dict[str, Any]],
+        user_id: str | None,
+        is_public: bool = False,
+    ) -> None:
+        """Merge many tenant-scoped relationships with one Neo4j round trip."""
+        if not relationships:
+            return
+        if rel_type not in SUPPORTED_REL_TYPES:
+            raise ValueError(f"Unsupported Neo4j relationship type: {rel_type}")
+
+        rows = []
+        for rel in relationships:
+            rows.append(
+                {
+                    "from_id": self.scoped_id(rel["from_raw_id"], user_id, is_public),
+                    "to_id": self.scoped_id(rel["to_raw_id"], user_id, is_public),
+                    "props": dict(rel.get("properties") or {}),
+                }
+            )
+
+        query = f"""
+        UNWIND $rows AS row
+        MATCH (a {{id: row.from_id}})
+        MATCH (b {{id: row.to_id}})
+        MERGE (a)-[r:{rel_type}]->(b)
+        SET r += row.props
+        """
+        self.run_query(query, {"rows": rows})

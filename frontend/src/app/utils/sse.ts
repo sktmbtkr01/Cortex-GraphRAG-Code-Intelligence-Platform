@@ -5,7 +5,9 @@ export type IngestStreamEvent = {
   message: string;
   meta?: Record<string, unknown>;
   repo?: string;
-  stats?: Record<string, number>;
+  stats?: Record<string, unknown> & {
+    timings_ms?: Record<string, number>;
+  };
   snapshot?: string;
 };
 

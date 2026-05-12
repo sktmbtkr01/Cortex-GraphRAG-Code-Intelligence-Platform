@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     embedding_batch_size: int = 64
     embedding_cache_dir: str | None = None
     embedding_local_files_only: bool = False
+    embedding_device: str = "cpu"
 
     github_pat: str | None = None
     github_webhook_secret: str | None = None
@@ -27,6 +28,9 @@ class Settings(BaseSettings):
     github_oauth_client_secret: str | None = None
     github_fetch_concurrency: int = 25
     file_processing_concurrency: int = 8
+    file_processing_batch_size: int = 10
+    ingest_source: str = "github_api"
+    git_clone_timeout_seconds: int = 300
     github_request_timeout_seconds: float = 30.0
     github_connect_timeout_seconds: float = 10.0
     github_max_keepalive_connections: int = 25
@@ -34,6 +38,8 @@ class Settings(BaseSettings):
     github_retry_attempts: int = 3
     ingest_job_max_age_seconds: int = 3600
     ingest_job_max_events: int = 500
+    job_store_backend: str = "memory"
+    redis_url: str | None = None
 
     # Multi-tenant safety: reject repos larger than this (in MB)
     max_repo_size_mb: int = 500

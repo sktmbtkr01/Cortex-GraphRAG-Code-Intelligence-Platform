@@ -51,6 +51,7 @@ class Chunk:
     branch: str = "main"
     commit_sha: str | None = None
     ingest_run_id: str | None = None
+    file_sha: str | None = None
 
     metadata: dict = field(default_factory=dict)
 

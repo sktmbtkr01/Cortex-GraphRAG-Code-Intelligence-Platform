@@ -36,8 +36,24 @@ interface GitHubBranch {
 
 function simplifyIngestStage(stage: string, message = "") {
   const text = `${stage} ${message}`.toLowerCase();
-  if (text.includes("chunk")) return "chunking";
+  if (stage === "fetching_tree") return "fetching metadata";
+  if (stage === "clone_start") return "cloning";
+  if (stage === "clone_done") return "files selected";
+  if (stage === "embedding") return "embedding";
+  if (stage === "embedding_batch") return "embedding";
+  if (stage === "upserting") return "upserting";
+  if (stage === "qdrant_upsert") return "upserting";
+  if (stage === "graph_building") return "building graph";
+  if (stage === "graph_write") return "building graph";
+  if (stage === "file_filtering") return "filtering files";
+  if (stage === "processing_batch") return "processing files";
+  if (stage === "cleanup") return "cleanup";
+  if (stage === "timing_summary") return "timings";
+  if (stage === "done") return "complete";
   if (text.includes("embed")) return "embedding";
+  if (text.includes("upsert") || text.includes("qdrant")) return "upserting";
+  if (text.includes("clone")) return "cloning";
+  if (text.includes("chunk")) return "chunking";
   if (text.includes("graph") || text.includes("neo4j")) return "building graph";
   if (text.includes("snapshot")) return "snapshot";
   if (text.includes("fetch") || text.includes("github")) return "fetching files";
@@ -53,6 +69,31 @@ function simplifyIngestMessage(message: string) {
     .replace(/\s{2,}/g, " ")
     .replace(/\s+([,.])/g, "$1")
     .trim();
+}
+
+function formatIngestTimings(timings?: Record<string, number>) {
+  if (!timings) return "";
+
+  const labels: Record<string, string> = {
+    clone_ms: "clone",
+    tree_fetch_ms: "tree",
+    filter_ms: "filter",
+    file_fetch_ms: "fetch",
+    file_walk_ms: "walk",
+    parse_chunk_ms: "parse/chunk",
+    graph_write_ms: "graph",
+    embedding_ms: "embed",
+    sparse_vector_ms: "sparse",
+    qdrant_upsert_ms: "upsert",
+    snapshot_ms: "snapshot",
+    total_ms: "total",
+  };
+
+  return Object.entries(timings)
+    .filter(([, value]) => typeof value === "number")
+    .sort(([left], [right]) => (left === "total_ms" ? 1 : right === "total_ms" ? -1 : 0))
+    .map(([key, value]) => `${labels[key] || key.replace(/_ms$/, "")}: ${(value / 1000).toFixed(1)}s`)
+    .join(" · ");
 }
 
 function upsertIngestEvent(
@@ -206,10 +247,11 @@ export default function ReposPage() {
 
   const pushToast = (event: IngestStreamEvent) => {
     const stage = simplifyIngestStage(event.stage, event.message);
+    const timingSummary = event.type === "done" ? formatIngestTimings(event.stats?.timings_ms) : "";
     const toast = {
       id: `${stage}-${event.state}`,
       stage,
-      message: simplifyIngestMessage(event.message),
+      message: timingSummary || simplifyIngestMessage(event.message),
       state: event.state === "lost" ? "error" as const : event.state === "queued" ? "running" as const : event.state,
     };
 
@@ -407,8 +449,15 @@ export default function ReposPage() {
         credentials: "include",
         headers: authHeaders(),
       });
-      if (res.ok) void fetchRepos();
-      else alert("Failed to delete repository.");
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.status === "success") {
+        void fetchRepos();
+      } else if (res.ok) {
+        void fetchRepos();
+        alert(`Repository delete was incomplete. Graph remaining: ${data.graph_remaining ?? "unknown"}, Qdrant remaining: ${data.qdrant_remaining ?? "unknown"}.`);
+      } else {
+        alert(data.detail || "Failed to delete repository.");
+      }
     } catch (e) {
       alert("Error reaching backend.");
     }

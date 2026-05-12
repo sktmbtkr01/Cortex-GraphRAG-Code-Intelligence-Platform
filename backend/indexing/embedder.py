@@ -26,10 +26,15 @@ class CortexEmbedder:
         self.model = settings.embedding_model
         self.dimensions = settings.embedding_dimensions
         self.batch_size = settings.embedding_batch_size
+        self.device = settings.embedding_device.lower().strip()
+        embedding_kwargs = {}
+        if self.device == "cuda":
+            embedding_kwargs["providers"] = ["CUDAExecutionProvider"]
         self.client = TextEmbedding(
             model_name=self.model,
             cache_dir=settings.embedding_cache_dir,
             local_files_only=settings.embedding_local_files_only,
+            **embedding_kwargs,
         )
 
     def _embed_sync(self, texts: list[str]) -> list[list[float]]:
@@ -57,9 +62,10 @@ class CortexEmbedder:
             return []
 
         logger.info(
-            "Embedding %s texts locally with FastEmbed model '%s'.",
+            "Embedding %s texts locally with FastEmbed model '%s' on %s.",
             len(texts),
             self.model,
+            self.device,
         )
         return await asyncio.to_thread(self._embed_sync, texts)
 

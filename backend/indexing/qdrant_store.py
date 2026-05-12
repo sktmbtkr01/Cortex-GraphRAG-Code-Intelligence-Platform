@@ -116,6 +116,7 @@ class VectorStore:
             ("repo", qmodels.PayloadSchemaType.KEYWORD),
             ("branch", qmodels.PayloadSchemaType.KEYWORD),
             ("commit_sha", qmodels.PayloadSchemaType.KEYWORD),
+            ("file_sha", qmodels.PayloadSchemaType.KEYWORD),
             ("ingest_run_id", qmodels.PayloadSchemaType.KEYWORD),
             ("file_path", qmodels.PayloadSchemaType.KEYWORD),
             ("source_type", qmodels.PayloadSchemaType.KEYWORD),
@@ -157,6 +158,7 @@ class VectorStore:
                 "repo": chunk.repo,
                 "branch": chunk.branch,
                 "commit_sha": chunk.commit_sha,
+                "file_sha": chunk.file_sha,
                 "ingest_run_id": chunk.ingest_run_id,
                 "file_path": chunk.file_path,
                 "language": chunk.language,
@@ -203,7 +205,13 @@ class VectorStore:
         )
         logger.info(f"Upserted {len(points)} chunks to Qdrant collection '{self.collection_name}'.")
 
-    def delete_by_file(self, repo: str, file_path: str, branch: str | None = None) -> None:
+    def delete_by_file(
+        self,
+        repo: str,
+        file_path: str,
+        branch: str | None = None,
+        user_id: str | None = None,
+    ) -> None:
         """Filter-delete all chunks associated with a specific file. Used for webhooks."""
         must_conditions = [
             qmodels.FieldCondition(
@@ -222,13 +230,21 @@ class VectorStore:
                     match=qmodels.MatchValue(value=branch)
                 )
             )
+        if user_id:
+            must_conditions.append(
+                qmodels.FieldCondition(
+                    key="user_id",
+                    match=qmodels.MatchValue(value=user_id)
+                )
+            )
         self.client.delete(
             collection_name=self.collection_name,
             points_selector=qmodels.FilterSelector(
                 filter=qmodels.Filter(must=must_conditions)
-            )
+            ),
+            wait=True,
         )
-        logger.info(f"Deleted chunks for {repo}/{file_path} (branch={branch})")
+        logger.info(f"Deleted chunks for {repo}/{file_path} (branch={branch}, user={user_id})")
 
     def delete_by_repo(self, repo: str, user_id: str | None = None, branch: str | None = None) -> None:
         """Filter-delete chunks associated with a repo, optionally scoped by branch and user_id."""
@@ -268,9 +284,47 @@ class VectorStore:
             collection_name=self.collection_name,
             points_selector=qmodels.FilterSelector(
                 filter=qmodels.Filter(must=must_conditions)
-            )
+            ),
+            wait=True,
         )
         logger.info(f"Deleted chunks for repo {repo} (branch={branch}, user={user_id})")
+
+    def count_by_repo(self, repo: str, user_id: str | None = None, branch: str | None = None) -> int:
+        """Count chunks associated with a repo, optionally scoped by branch and user_id."""
+        try:
+            self.client.get_collection(self.collection_name)
+        except UnexpectedResponse as e:
+            if "not found" in str(e).lower() or "404" in str(e):
+                return 0
+            raise
+
+        must_conditions = [
+            qmodels.FieldCondition(
+                key="repo",
+                match=qmodels.MatchValue(value=repo),
+            ),
+        ]
+        if user_id:
+            must_conditions.append(
+                qmodels.FieldCondition(
+                    key="user_id",
+                    match=qmodels.MatchValue(value=user_id),
+                )
+            )
+        if branch:
+            must_conditions.append(
+                qmodels.FieldCondition(
+                    key="branch",
+                    match=qmodels.MatchValue(value=branch),
+                )
+            )
+
+        result = self.client.count(
+            collection_name=self.collection_name,
+            count_filter=qmodels.Filter(must=must_conditions),
+            exact=True,
+        )
+        return int(result.count or 0)
 
     def delete_stale_branch_runs(
         self,
@@ -302,6 +356,7 @@ class VectorStore:
                     ],
                 )
             ),
+            wait=True,
         )
         logger.info(
             "Deleted stale chunks for repo %s branch %s excluding run %s",
@@ -333,6 +388,7 @@ class VectorStore:
             points_selector=qmodels.FilterSelector(
                 filter=qmodels.Filter(must=must_conditions)
             ),
+            wait=True,
         )
         logger.info(
             "Deleted chunks for failed repo %s branch %s run %s",
