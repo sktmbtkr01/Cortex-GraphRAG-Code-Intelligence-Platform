@@ -21,10 +21,6 @@ from core.logger import get_logger
 from agents.tools import ALL_TOOLS
 from models.schemas import HistoryMessage
 
-# For fallback model
-from google import genai
-from langchain_core.language_models.chat_models import BaseChatModel
-
 logger = get_logger(__name__)
 
 

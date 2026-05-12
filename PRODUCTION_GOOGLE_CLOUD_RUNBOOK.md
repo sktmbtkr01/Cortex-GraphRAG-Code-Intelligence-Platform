@@ -272,6 +272,33 @@ Implementation progress:
 - Vertex responses are dimension-checked against `EMBEDDING_DIMENSIONS`.
 - Sparse vectors still remain local.
 
+### 6.2.1 Add Vertex LLM Backend
+
+Status: implemented locally as a generation backend switch.
+
+Production should route quota-heavy generation through Vertex AI:
+
+```env
+LLM_BACKEND=vertex
+VERTEX_LLM_MODEL=gemini-2.5-flash
+VERTEX_LLM_FAST_MODEL=gemini-2.5-flash-lite
+VERTEX_LLM_REASONING_MODEL=gemini-2.5-pro
+LLM_RETRY_ATTEMPTS=3
+```
+
+Current routing:
+
+- Snapshot generation uses the shared Cortex LLM client.
+- Health generation uses the shared Cortex LLM client.
+- Direct semantic RAG answer generation uses the shared Cortex LLM client.
+- Existing LangGraph agent tool-calling path still uses Groq primary; Gemini API fallback remains separate.
+
+Why:
+
+- Avoids Google AI Studio API-key quota pressure for snapshot, health, and normal answers.
+- Uses Cloud Run service-account auth with Vertex AI.
+- Keeps prompts and response shape unchanged.
+
 Recommended batching rules:
 
 - Max 250 texts per embedding request.

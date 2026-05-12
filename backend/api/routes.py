@@ -4,12 +4,11 @@ import re
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
-from google import genai
-from google.genai import types
 from langchain_core.messages import AIMessage, ToolMessage
 
 from core.auth import AuthenticatedUser, get_current_user
 from core.config import settings
+from core.llm_client import CortexLLMClient
 from models.schemas import (
     GraphExploreResponse,
     GraphStatsResponse,
@@ -32,6 +31,7 @@ from indexing.embedder import CortexEmbedder
 from indexing.graph_builder.neo4j_manager import Neo4jManager
 from retrieval.rag_pipeline import RAGPipeline
 from agents.supervisor import run_agent
+from agents.summarizer import generate_repo_snapshot
 from agents.tools import get_call_graph, get_dependencies, set_agent_user_context
 from ingestion.github_client import GitHubClient
 from ingestion.runner import run_ingest_job
@@ -1110,6 +1110,41 @@ async def get_repo_snapshot(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/repos/{owner}/{repo_name}/snapshot/regenerate", response_model=SnapshotResponse)
+async def regenerate_repo_snapshot(
+    owner: str,
+    repo_name: str,
+    branch: str | None = None,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> SnapshotResponse:
+    """Regenerate a snapshot for an already-indexed repo branch without re-ingesting."""
+    full_name = f"{owner}/{repo_name}"
+    branch_name = branch or "main"
+    try:
+        neo4j = Neo4jManager()
+        rows = neo4j.run_query(
+            "MATCH (r:Repository {full_name: $repo}) "
+            "WHERE (r.user_id = $user_id OR r.is_public = true) "
+            "AND coalesce(r.branch, r.default_branch, 'main') = $branch "
+            "RETURN r.commit_sha AS commit_sha",
+            {"repo": full_name, "branch": branch_name, "user_id": user.user_id},
+        )
+        if not rows:
+            raise HTTPException(status_code=404, detail="Indexed branch not found")
+
+        snapshot = await generate_repo_snapshot(full_name, user.user_id, branch=branch_name)
+        cache_set_json(
+            snapshot_cache_key(user.user_id, full_name, branch_name, rows[0].get("commit_sha")),
+            {"repo": full_name, "snapshot": snapshot},
+            settings.report_cache_ttl_seconds,
+        )
+        return SnapshotResponse(repo=full_name, snapshot=snapshot)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 async def _run_repo_health_check(
     owner: str,
     repo_name: str,
@@ -1246,21 +1281,17 @@ async def _run_repo_health_check(
             f"Evidence excerpts:\n{json.dumps(evidence[:21], default=str, indent=2)}"
         )
 
-        client = genai.Client(api_key=settings.gemini_api_key)
-        response = await client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+        final_answer = await CortexLLMClient().generate_content(
             contents=health_prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=(
-                    "You are Cortex's repository health-check reporter. "
-                    "Synthesize a careful, evidence-led engineering review from the provided signals only. "
-                    "Focus on existing engineering signals, risks, gaps, and manual review priorities. "
-                    "Do not call tools. Do not rely on README-style claims. Do not claim complete security coverage."
-                ),
-                temperature=0.2,
+            system_instruction=(
+                "You are Cortex's repository health-check reporter. "
+                "Synthesize a careful, evidence-led engineering review from the provided signals only. "
+                "Focus on existing engineering signals, risks, gaps, and manual review priorities. "
+                "Do not call tools. Do not rely on README-style claims. Do not claim complete security coverage."
             ),
+            temperature=0.2,
         )
-        final_answer = response.text or "No report generated."
+        final_answer = final_answer or "No report generated."
         signals["cache"] = "miss"
         cache_set_json(
             health_cache_key(user.user_id, full_name, branch_name, commit_sha),

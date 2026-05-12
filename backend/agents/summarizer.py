@@ -9,7 +9,7 @@ Generates an instant architectural snapshot after ingestion by:
 The snapshot is stored separately from graph visualization metadata.
 """
 
-from core.config import settings
+from core.llm_client import CortexLLMClient
 from core.logger import get_logger
 from core.tenant import tenant_scoped_id
 from indexing.graph_builder.neo4j_manager import Neo4jManager
@@ -151,11 +151,6 @@ async def generate_repo_snapshot(repo: str, user_id: str | None = None, branch: 
 
     # ── 7. Generate snapshot via LLM ─────────────────────────────────
     try:
-        from google import genai
-        from google.genai import types
-        
-        client = genai.Client(api_key=settings.gemini_api_key)
-        
         system_prompt = (
             "You are Cortex's architecture snapshot writer. Create a repo orientation brief, "
             "not a health review and not a security audit. Rely first on the README/project "
@@ -166,16 +161,12 @@ async def generate_repo_snapshot(repo: str, user_id: str | None = None, branch: 
             "Mention uncertainty when the README or graph evidence is thin. Do not make risk "
             "or vulnerability claims here; save review language for the health check. Max 450 words."
         )
-        
-        response = await client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+
+        snapshot = await CortexLLMClient().generate_content(
             contents=context,
-            config=types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                temperature=0.3,
-            ),
+            system_instruction=system_prompt,
+            temperature=0.3,
         )
-        snapshot = response.text
     except Exception as e:
         logger.error(f"Snapshot generation failed: {e}")
         # Fallback: return the raw metrics

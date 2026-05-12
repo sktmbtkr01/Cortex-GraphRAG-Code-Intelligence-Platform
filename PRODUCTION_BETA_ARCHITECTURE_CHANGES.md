@@ -589,6 +589,36 @@ EMBEDDING_DIMENSIONS=768
 
 ---
 
+## 12. Vertex LLM Backend
+
+Status: implemented locally behind `LLM_BACKEND=vertex`.
+
+What changed:
+
+- Added `backend/core/llm_client.py`.
+- Snapshot generation now uses the shared LLM client.
+- Health generation now uses the shared LLM client.
+- Direct semantic RAG answer generation now uses the shared LLM client.
+- `LLM_BACKEND=gemini_api` keeps the old API-key path available.
+- `LLM_BACKEND=vertex` uses service-account auth through Vertex AI.
+
+Production env:
+
+```env
+LLM_BACKEND=vertex
+VERTEX_LLM_MODEL=gemini-2.5-flash
+VERTEX_LLM_FAST_MODEL=gemini-2.5-flash-lite
+VERTEX_LLM_REASONING_MODEL=gemini-2.5-pro
+LLM_RETRY_ATTEMPTS=3
+```
+
+Current boundary:
+
+- The LangGraph agent route still uses Groq primary and the existing Gemini API fallback path.
+- Vertex tool-calling for the LangGraph agent is a later integration, not part of this quota fix.
+
+---
+
 ## Local Validation Checklist
 
 Before cloud deployment, run local tests for:

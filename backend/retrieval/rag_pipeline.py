@@ -4,10 +4,9 @@ Cortex Direct RAG Pipeline.
 
 from typing import Any
 
-from google import genai
 from google.genai import types
 
-from core.config import settings
+from core.llm_client import CortexLLMClient
 from core.logger import get_logger
 from indexing.embedder import CortexEmbedder
 from indexing.qdrant_store import VectorStore
@@ -65,10 +64,7 @@ class RAGPipeline:
     def __init__(self):
         self.embedder = CortexEmbedder()
         self.vector_store = VectorStore()
-        if not settings.gemini_api_key:
-            raise ValueError("GEMINI_API_KEY must be set in environment variables.")
-        self.client = genai.Client(api_key=settings.gemini_api_key)
-        self.model = "gemini-2.5-flash"  # Flash for direct RAG speeds
+        self.client = CortexLLMClient()
 
     async def query(
         self,
@@ -233,18 +229,9 @@ class RAGPipeline:
             f"User Question:\n{user_query}\n"
         )
 
-        # 6. Call Gemini
+        # 6. Call configured LLM
         try:
-            logger.info("Calling Gemini 2.5 Flash for RAG generation...")
-            # Prepare contents
-            contents = []
-            
-            # System instruction
-            generation_config = types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                temperature=0.2, # Low temperature for accurate grounding
-            )
-
+            logger.info("Calling configured LLM for RAG generation...")
             # Add history
             if history:
                 messages = []
@@ -254,21 +241,19 @@ class RAGPipeline:
                         messages.append(types.Content(role=gemini_role, parts=[types.Part.from_text(text=msg.content)]))
                 
                 messages.append(types.Content(role="user", parts=[types.Part.from_text(text=prompt_text)]))
-                response = await self.client.aio.models.generate_content(
-                    model=self.model,
+                answer = await self.client.generate_content(
                     contents=messages,
-                    config=generation_config
+                    system_instruction=system_prompt,
+                    temperature=0.2,
                 )
             else:
-                response = await self.client.aio.models.generate_content(
-                    model=self.model,
+                answer = await self.client.generate_content(
                     contents=prompt_text,
-                    config=generation_config
+                    system_instruction=system_prompt,
+                    temperature=0.2,
                 )
-
-            answer = response.text
         except Exception as e:
-            logger.error(f"Gemini generation failed: {e}")
+            logger.error(f"LLM generation failed: {e}")
             answer = f"Error generating answer: {e}"
 
         if secret_value_request and answer:

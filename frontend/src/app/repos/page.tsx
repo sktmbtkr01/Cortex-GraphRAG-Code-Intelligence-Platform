@@ -479,7 +479,19 @@ export default function ReposPage() {
     try {
       const res = await fetch(`${API_URL}/api/v1/repos/${repoName}/snapshot?branch=${encodeURIComponent(branchName)}`, { headers: authHeaders(), credentials: "include" });
       const data = await res.json();
-      if (res.ok) setDrawerContent(data.snapshot);
+      if (res.ok && !String(data.snapshot || "").toLowerCase().includes("snapshot not available")) {
+        setDrawerContent(data.snapshot);
+      } else if (res.ok) {
+        setDrawerContent("Snapshot is missing. Regenerating it now...");
+        const retry = await fetch(`${API_URL}/api/v1/repos/${repoName}/snapshot/regenerate?branch=${encodeURIComponent(branchName)}`, {
+          method: "POST",
+          headers: authHeaders(),
+          credentials: "include",
+        });
+        const retryData = await retry.json();
+        if (retry.ok) setDrawerContent(retryData.snapshot);
+        else setDrawerContent(`Error: ${retryData.detail || "Failed to regenerate snapshot."}`);
+      }
       else setDrawerContent(`Error: ${data.detail}`);
     } catch (e) {
       setDrawerContent("Failed to connect to backend.");

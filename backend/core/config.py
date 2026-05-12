@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     vertex_embedding_task_type: str = "RETRIEVAL_DOCUMENT"
     vertex_embedding_max_text_chars: int = 20_000
     vertex_embedding_retry_attempts: int = 3
+    llm_backend: str = "gemini_api"
+    vertex_llm_model: str = "gemini-2.5-flash"
+    vertex_llm_fast_model: str = "gemini-2.5-flash-lite"
+    vertex_llm_reasoning_model: str = "gemini-2.5-pro"
+    llm_retry_attempts: int = 3
 
     github_pat: str | None = None
     github_webhook_secret: str | None = None
