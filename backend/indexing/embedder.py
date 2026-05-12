@@ -9,6 +9,7 @@ from typing import Any
 
 from google import genai
 from google.genai import types
+import google.generativeai as genai_classic
 
 from core.config import settings
 from core.logger import get_logger
@@ -66,10 +67,8 @@ class CortexEmbedder:
     def _init_gemini_api(self) -> None:
         if not settings.gemini_api_key:
             raise ValueError("GEMINI_API_KEY is required when EMBEDDING_BACKEND=gemini_api.")
-        self.client = genai.Client(
-            api_key=settings.gemini_api_key,
-            http_options={"api_version": "v1"},
-        )
+        genai_classic.configure(api_key=settings.gemini_api_key)
+        self.client = "gemini_api"
 
     def _init_vertex(self) -> None:
         if not settings.vertex_project_id:
@@ -140,18 +139,30 @@ class CortexEmbedder:
         return batches
 
     def _embed_genai_sync_once(self, texts: list[str]) -> list[list[float]]:
+        if self.backend == "gemini_api":
+            result = genai_classic.embed_content(
+                model=f"models/{self.model}",
+                content=texts,
+                task_type="retrieval_document",
+                output_dimensionality=self.dimensions,
+            )
+            dense_vectors = result["embedding"]
+            if len(dense_vectors) != len(texts):
+                raise ValueError(
+                    f"Embedding API returned {len(dense_vectors)} embeddings for {len(texts)} inputs."
+                )
+            return self._validate_dimensions(dense_vectors)
+
         if self.client is None:
             raise RuntimeError("Embedding client is not initialized.")
-        config_kwargs = {
-            "task_type": settings.vertex_embedding_task_type,
-            "output_dimensionality": self.dimensions,
-        }
-        if self.backend == "vertex":
-            config_kwargs["auto_truncate"] = True
         response = self.client.models.embed_content(
             model=self.model,
             contents=texts,
-            config=types.EmbedContentConfig(**config_kwargs),
+            config=types.EmbedContentConfig(
+                task_type=settings.vertex_embedding_task_type,
+                output_dimensionality=self.dimensions,
+                auto_truncate=True,
+            ),
         )
         dense_vectors = [embedding.values for embedding in response.embeddings or []]
         if len(dense_vectors) != len(texts):
