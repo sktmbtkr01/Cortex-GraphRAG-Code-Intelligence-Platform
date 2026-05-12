@@ -7,9 +7,10 @@ import hashlib
 import time
 from typing import Any
 
+import httpx
+
 from google import genai
 from google.genai import types
-import google.generativeai as genai_classic
 
 from core.config import settings
 from core.logger import get_logger
@@ -67,8 +68,8 @@ class CortexEmbedder:
     def _init_gemini_api(self) -> None:
         if not settings.gemini_api_key:
             raise ValueError("GEMINI_API_KEY is required when EMBEDDING_BACKEND=gemini_api.")
-        genai_classic.configure(api_key=settings.gemini_api_key)
         self.client = "gemini_api"
+        self._gemini_api_key = settings.gemini_api_key
 
     def _init_vertex(self) -> None:
         if not settings.vertex_project_id:
@@ -140,18 +141,7 @@ class CortexEmbedder:
 
     def _embed_genai_sync_once(self, texts: list[str]) -> list[list[float]]:
         if self.backend == "gemini_api":
-            result = genai_classic.embed_content(
-                model=f"models/{self.model}",
-                content=texts,
-                task_type="retrieval_document",
-                output_dimensionality=self.dimensions,
-            )
-            dense_vectors = result["embedding"]
-            if len(dense_vectors) != len(texts):
-                raise ValueError(
-                    f"Embedding API returned {len(dense_vectors)} embeddings for {len(texts)} inputs."
-                )
-            return self._validate_dimensions(dense_vectors)
+            return self._embed_gemini_api_rest(texts)
 
         if self.client is None:
             raise RuntimeError("Embedding client is not initialized.")
@@ -165,6 +155,30 @@ class CortexEmbedder:
             ),
         )
         dense_vectors = [embedding.values for embedding in response.embeddings or []]
+        if len(dense_vectors) != len(texts):
+            raise ValueError(
+                f"Embedding API returned {len(dense_vectors)} embeddings for {len(texts)} inputs."
+            )
+        return self._validate_dimensions(dense_vectors)
+
+    def _embed_gemini_api_rest(self, texts: list[str]) -> list[list[float]]:
+        url = (
+            f"https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{self.model}:batchEmbedContents?key={self._gemini_api_key}"
+        )
+        requests_body = [
+            {
+                "model": f"models/{self.model}",
+                "content": {"parts": [{"text": t}]},
+                "taskType": "RETRIEVAL_DOCUMENT",
+                "outputDimensionality": self.dimensions,
+            }
+            for t in texts
+        ]
+        resp = httpx.post(url, json={"requests": requests_body}, timeout=120)
+        resp.raise_for_status()
+        data = resp.json()
+        dense_vectors = [emb["values"] for emb in data["embeddings"]]
         if len(dense_vectors) != len(texts):
             raise ValueError(
                 f"Embedding API returned {len(dense_vectors)} embeddings for {len(texts)} inputs."
