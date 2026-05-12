@@ -491,3 +491,39 @@ class VectorStore:
             })
 
         return final_results
+
+    def sample_payloads(
+        self,
+        filters: dict[str, str],
+        limit: int = 20,
+        user_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch stored chunk payloads by metadata without spending embedding quota."""
+        must_conditions = [
+            qmodels.FieldCondition(key=key, match=qmodels.MatchValue(value=value))
+            for key, value in filters.items()
+        ]
+        if user_id:
+            must_conditions.append(
+                qmodels.Filter(
+                    should=[
+                        qmodels.FieldCondition(
+                            key="user_id",
+                            match=qmodels.MatchValue(value=user_id),
+                        ),
+                        qmodels.FieldCondition(
+                            key="is_public",
+                            match=qmodels.MatchValue(value=True),
+                        ),
+                    ]
+                )
+            )
+
+        points, _ = self.client.scroll(
+            collection_name=self.collection_name,
+            scroll_filter=qmodels.Filter(must=must_conditions),
+            limit=limit,
+            with_payload=True,
+            with_vectors=False,
+        )
+        return [point.payload or {} for point in points]

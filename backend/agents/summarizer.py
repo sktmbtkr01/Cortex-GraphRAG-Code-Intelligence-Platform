@@ -14,7 +14,6 @@ from core.logger import get_logger
 from core.tenant import tenant_scoped_id
 from indexing.graph_builder.neo4j_manager import Neo4jManager
 from indexing.qdrant_store import VectorStore
-from indexing.embedder import CortexEmbedder
 
 logger = get_logger(__name__)
 
@@ -106,24 +105,18 @@ async def generate_repo_snapshot(repo: str, user_id: str | None = None, branch: 
     readme_text = ""
     try:
         vs = VectorStore()
-        embedder = CortexEmbedder()
-        dense = await embedder.embed_batch(["project overview README"])
-        sparse = embedder.generate_sparse_vector("project overview README")
         vs.ensure_collection()
-        hits = vs.search(
-            query_dense=dense[0],
-            query_sparse=sparse,
+        docs = vs.sample_payloads(
             filters={"repo": repo, "branch": branch, "source_type": "docs"},
-            top_k=3,
+            limit=20,
             user_id=user_id,
         )
-        for h in hits:
-            p = h.get("payload", {})
+        for p in docs:
             if "readme" in p.get("file_path", "").lower():
                 readme_text = p.get("text", "")[:2000]
                 break
-        if not readme_text and hits:
-            readme_text = hits[0].get("payload", {}).get("text", "")[:1500]
+        if not readme_text and docs:
+            readme_text = docs[0].get("text", "")[:1500]
     except Exception as e:
         logger.warning(f"Failed to fetch README for snapshot: {e}")
     

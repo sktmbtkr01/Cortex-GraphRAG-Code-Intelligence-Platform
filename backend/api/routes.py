@@ -27,7 +27,6 @@ router = APIRouter()
 
 
 from indexing.qdrant_store import VectorStore
-from indexing.embedder import CortexEmbedder
 from indexing.graph_builder.neo4j_manager import Neo4jManager
 from retrieval.rag_pipeline import RAGPipeline
 from agents.supervisor import run_agent
@@ -1201,37 +1200,52 @@ async def _run_repo_health_check(
             {"repo": full_name, "branch": branch_name, "user_id": user.user_id},
         )
 
-        embedder = CortexEmbedder()
-        vector_store = VectorStore()
-        vector_store.ensure_collection()
-        evidence_queries = [
-            "authentication authorization middleware csrf jwt password token secret api key",
-            "dependency package requirements package.json pyproject security config",
-            "test coverage unit tests integration tests pytest jest",
-            "todo fixme hack temporary risky deprecated",
-            "database query sql raw execute eval subprocess shell command",
-            "error handling logging retry timeout validation exception handling",
-            "deployment docker ci cd environment configuration production",
-        ]
         evidence = []
         secret_signal_count = 0
-        for query_text in evidence_queries:
-            dense_vectors = await embedder.embed_batch([query_text])
-            hits = vector_store.search(
-                query_dense=dense_vectors[0],
-                query_sparse=embedder.generate_sparse_vector(query_text),
+        evidence_file_patterns = [
+            (".env", "environment and secrets surface"),
+            ("requirements", "python dependencies"),
+            ("package.json", "javascript dependencies"),
+            ("pyproject", "python project configuration"),
+            ("docker", "container/deployment configuration"),
+            ("test", "test coverage signals"),
+            ("auth", "authentication and authorization surface"),
+            ("middleware", "request middleware surface"),
+            ("config", "configuration surface"),
+        ]
+        try:
+            vector_store = VectorStore()
+            vector_store.ensure_collection()
+            payloads = vector_store.sample_payloads(
                 filters={"repo": full_name, "branch": branch_name},
-                top_k=4,
+                limit=120,
                 user_id=user.user_id,
             )
-            for hit in hits[:3]:
-                payload = hit.get("payload", {})
+            selected_payloads = []
+            seen_paths = set()
+            for pattern, reason in evidence_file_patterns:
+                for payload in payloads:
+                    file_path = str(payload.get("file_path") or "").lower()
+                    if pattern in file_path and payload.get("file_path") not in seen_paths:
+                        selected_payloads.append((reason, payload))
+                        seen_paths.add(payload.get("file_path"))
+                        break
+            if len(selected_payloads) < 12:
+                for payload in payloads:
+                    file_path = payload.get("file_path")
+                    if file_path not in seen_paths:
+                        selected_payloads.append(("representative indexed chunk", payload))
+                        seen_paths.add(file_path)
+                    if len(selected_payloads) >= 21:
+                        break
+
+            for reason, payload in selected_payloads[:21]:
                 text = payload.get("text", "")
                 if payload.get("security_censored") or "[REDACTED]" in text:
                     secret_signal_count += 1
                 evidence.append(
                     {
-                        "query": query_text,
+                        "reason": reason,
                         "file_path": payload.get("file_path"),
                         "line_range": (
                             f"{payload.get('start_line')}-{payload.get('end_line')}"
@@ -1240,10 +1254,16 @@ async def _run_repo_health_check(
                         ),
                         "source_type": payload.get("source_type"),
                         "language": payload.get("language"),
-                        "score": hit.get("score"),
                         "excerpt": text[:900],
                     }
                 )
+        except Exception as e:
+            evidence.append(
+                {
+                    "reason": "stored chunk evidence unavailable",
+                    "excerpt": f"Qdrant payload sampling failed: {e}",
+                }
+            )
 
         signals = {
             "repo": full_name,

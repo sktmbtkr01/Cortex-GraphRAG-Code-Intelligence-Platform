@@ -571,7 +571,8 @@ What changed:
 
 - `CortexEmbedder` now supports both `fastembed` and `vertex`.
 - Local development can continue using FastEmbed/GPU.
-- Production can use Vertex AI embeddings without changing ingestion, query, health, snapshot, or agent callers.
+- Production can use Vertex AI embeddings without changing ingestion, query, or agent callers.
+- Health and snapshot no longer perform query-time embeddings; they reuse stored graph/Qdrant payload evidence so the low Vertex embedding request quota is reserved for ingestion and real semantic queries.
 - The dense vector interface remains `embed_batch(texts) -> list[list[float]]`.
 - Sparse vector generation remains local.
 - Vertex requests are batched and retried with exponential backoff.
@@ -599,6 +600,8 @@ What changed:
 - Snapshot generation now uses the shared LLM client.
 - Health generation now uses the shared LLM client.
 - Direct semantic RAG answer generation now uses the shared LLM client.
+- Snapshot README lookup no longer embeds a synthetic README query; it samples stored doc chunks.
+- Health evidence collection no longer embeds multiple synthetic review queries; it samples stored chunks and graph stats.
 - `LLM_BACKEND=gemini_api` keeps the old API-key path available.
 - `LLM_BACKEND=vertex` uses service-account auth through Vertex AI.
 
