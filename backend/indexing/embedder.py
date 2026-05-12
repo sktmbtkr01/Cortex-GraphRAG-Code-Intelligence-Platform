@@ -36,7 +36,7 @@ class CortexEmbedder:
             self.device = settings.embedding_device.lower().strip()
             self._init_fastembed()
         elif self.backend == "gemini_api":
-            self.model = settings.vertex_embedding_model
+            self.model = settings.gemini_api_embedding_model
             self.device = "gemini_api"
             self._init_gemini_api()
         else:

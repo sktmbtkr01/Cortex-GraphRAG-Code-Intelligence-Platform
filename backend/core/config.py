@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     vertex_embedding_retry_attempts: int = 3
     vertex_embedding_min_request_interval_seconds: float = 13.0
     vertex_embedding_quota_retry_seconds: float = 65.0
+    gemini_api_embedding_model: str = "text-embedding-004"
     gemini_api_embedding_max_text_chars: int = 4_000
     gemini_api_embedding_max_request_chars: int = 40_000
     gemini_api_embedding_min_request_interval_seconds: float = 0.5
