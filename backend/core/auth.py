@@ -38,6 +38,11 @@ def _cookie_is_secure() -> bool:
     return settings.environment.lower() not in ("development", "dev", "local")
 
 
+def _cookie_samesite() -> str:
+    """Cross-domain production frontend/backend calls require SameSite=None."""
+    return "lax" if not _cookie_is_secure() else "none"
+
+
 def set_session_cookie(response: Response, jwt_token: str) -> None:
     """Attach the JWT to the response as an HttpOnly cookie."""
     response.set_cookie(
@@ -46,7 +51,7 @@ def set_session_cookie(response: Response, jwt_token: str) -> None:
         max_age=JWT_EXPIRATION_SECONDS,
         httponly=True,
         secure=_cookie_is_secure(),
-        samesite="lax",
+        samesite=_cookie_samesite(),
         path="/",
     )
 
@@ -56,7 +61,7 @@ def clear_session_cookie(response: Response) -> None:
     response.delete_cookie(
         key=SESSION_COOKIE_NAME,
         path="/",
-        samesite="lax",
+        samesite=_cookie_samesite(),
         secure=_cookie_is_secure(),
         httponly=True,
     )

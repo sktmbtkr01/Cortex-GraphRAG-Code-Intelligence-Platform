@@ -4,6 +4,8 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Brain, Database, MessageSquare, Share2, LogOut, GitBranch as GitHubIcon } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
+import ConfirmDialog from "@/components/ConfirmDialog";
+import { useState } from "react";
 
 const NAV_ITEMS = [
   { href: "/repos", label: "Repo Manager", icon: Database },
@@ -14,6 +16,7 @@ const NAV_ITEMS = [
 export default function TopNav() {
   const pathname = usePathname();
   const { user, logout } = useAuth();
+  const [signOutOpen, setSignOutOpen] = useState(false);
 
   const isActive = (href: string): boolean => {
     if (href === "/repos") return pathname === "/repos";
@@ -61,11 +64,24 @@ export default function TopNav() {
             </div>
           </div>
 
-          <button type="button" className="top-nav-logout" onClick={() => void logout()}>
+          <button type="button" className="top-nav-logout" onClick={() => setSignOutOpen(true)}>
             <LogOut size={14} /> Sign out
           </button>
         </div>
       </nav>
+
+      <ConfirmDialog
+        open={signOutOpen}
+        title="Sign out of Cortex?"
+        message="This clears your Cortex session on this browser. GitHub may still remember the GitHub account currently signed in on github.com."
+        confirmLabel="Sign out"
+        cancelLabel="Cancel"
+        onCancel={() => setSignOutOpen(false)}
+        onConfirm={() => {
+          setSignOutOpen(false);
+          void logout();
+        }}
+      />
     </header>
   );
 }

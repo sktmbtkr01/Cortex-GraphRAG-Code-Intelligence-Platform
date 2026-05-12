@@ -10,6 +10,7 @@ import Drawer from "@/components/Drawer";
 import GlobalBrainBar from "@/components/GlobalBrainBar";
 import SearchableSelect from "@/components/ui/searchable-select";
 import { openIngestEventStream, type IngestStreamEvent } from "@/app/utils/sse";
+import ConfirmDialog from "@/components/ConfirmDialog";
 
 interface Repo {
   repo: string;
@@ -123,6 +124,7 @@ export default function ReposPage() {
   const [drawerContent, setDrawerContent] = useState("");
   const [drawerLoading, setDrawerLoading] = useState(false);
   const [toastEvents, setToastEvents] = useState<Array<{ id: string; stage: string; message: string; state: "running" | "done" | "error" }>>([]);
+  const [deleteTarget, setDeleteTarget] = useState<{ repo: string; branch: string } | null>(null);
 
   const ingestStreamRef = useRef<EventSource | null>(null);
   const ingestPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -441,8 +443,13 @@ export default function ReposPage() {
   };
 
   const handleDelete = async (repoName: string, branchName: string) => {
-    if (!confirm(`Are you sure you want to delete ${repoName} @ ${branchName} from the index?`)) return;
+    setDeleteTarget({ repo: repoName, branch: branchName });
+  };
 
+  const confirmDelete = async () => {
+    if (!deleteTarget) return;
+    const { repo: repoName, branch: branchName } = deleteTarget;
+    setDeleteTarget(null);
     try {
       const res = await fetch(`${API_URL}/api/v1/repos/${repoName}?branch=${encodeURIComponent(branchName)}`, {
         method: "DELETE",
@@ -700,6 +707,21 @@ export default function ReposPage() {
           </div>
         </article>
       </Drawer>
+
+      <ConfirmDialog
+        open={Boolean(deleteTarget)}
+        title="Delete indexed repository?"
+        message={
+          deleteTarget
+            ? `Delete ${deleteTarget.repo} @ ${deleteTarget.branch} from Cortex? This removes its indexed chunks and graph data.`
+            : ""
+        }
+        confirmLabel="Delete"
+        cancelLabel="Cancel"
+        tone="danger"
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={() => void confirmDelete()}
+      />
     </section>
   );
 }

@@ -73,6 +73,7 @@ async def github_login_url() -> dict:
             "client_id": client_id,
             "redirect_uri": redirect_uri,
             "scope": scopes,
+            "allow_signup": "true",
         }
     )
     url = f"https://github.com/login/oauth/authorize?{query}"

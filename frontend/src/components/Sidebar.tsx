@@ -4,10 +4,13 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { MessageSquare, Database, Share2, LogOut, GitBranch as GitHubIcon } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
+import ConfirmDialog from "@/components/ConfirmDialog";
+import { useState } from "react";
 
 export default function Sidebar() {
   const pathname = usePathname();
   const { user, logout } = useAuth();
+  const [signOutOpen, setSignOutOpen] = useState(false);
 
   return (
     <aside className="sidebar" aria-label="Primary navigation">
@@ -73,7 +76,7 @@ export default function Sidebar() {
           </div>
         </div>
         <button
-          onClick={logout}
+          onClick={() => setSignOutOpen(true)}
           title="Sign out"
           style={{
             background: "transparent",
@@ -92,6 +95,18 @@ export default function Sidebar() {
           <LogOut size={14} /> Sign out
         </button>
       </div>
+      <ConfirmDialog
+        open={signOutOpen}
+        title="Sign out of Cortex?"
+        message="This clears your Cortex session on this browser. GitHub may still remember the GitHub account currently signed in on github.com."
+        confirmLabel="Sign out"
+        cancelLabel="Cancel"
+        onCancel={() => setSignOutOpen(false)}
+        onConfirm={() => {
+          setSignOutOpen(false);
+          void logout();
+        }}
+      />
     </aside>
   );
 }
