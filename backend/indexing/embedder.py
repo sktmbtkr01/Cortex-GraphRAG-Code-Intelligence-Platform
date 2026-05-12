@@ -15,7 +15,7 @@ from core.logger import get_logger
 
 logger = get_logger(__name__)
 
-_last_vertex_embedding_request_at = 0.0
+_last_embedding_request_at = 0.0
 
 
 class CortexEmbedder:
@@ -23,9 +23,9 @@ class CortexEmbedder:
 
     def __init__(self):
         self.backend = settings.embedding_backend.lower().strip()
-        if self.backend not in {"fastembed", "vertex"}:
+        if self.backend not in {"fastembed", "vertex", "gemini_api"}:
             raise ValueError(
-                "Unsupported EMBEDDING_BACKEND. Expected 'fastembed' or 'vertex'."
+                "Unsupported EMBEDDING_BACKEND. Expected 'fastembed', 'vertex', or 'gemini_api'."
             )
 
         self.dimensions = settings.embedding_dimensions
@@ -35,6 +35,10 @@ class CortexEmbedder:
             self.model = settings.embedding_model
             self.device = settings.embedding_device.lower().strip()
             self._init_fastembed()
+        elif self.backend == "gemini_api":
+            self.model = settings.vertex_embedding_model
+            self.device = "gemini_api"
+            self._init_gemini_api()
         else:
             self.model = settings.vertex_embedding_model
             self.device = "vertex"
@@ -58,6 +62,11 @@ class CortexEmbedder:
             local_files_only=settings.embedding_local_files_only,
             **embedding_kwargs,
         )
+
+    def _init_gemini_api(self) -> None:
+        if not settings.gemini_api_key:
+            raise ValueError("GEMINI_API_KEY is required when EMBEDDING_BACKEND=gemini_api.")
+        self.client = genai.Client(api_key=settings.gemini_api_key)
 
     def _init_vertex(self) -> None:
         if not settings.vertex_project_id:
@@ -85,24 +94,27 @@ class CortexEmbedder:
         dense_vectors = [vector.tolist() for vector in vectors]
         return self._validate_dimensions(dense_vectors)
 
-    def _truncate_for_vertex(self, text: str) -> str:
-        # Vertex embedding limits are token-based, and dense code can tokenize
-        # much heavier than prose. Keep a conservative hard cap even if an env
-        # var is accidentally left at the model's nominal token limit.
-        max_chars = min(settings.vertex_embedding_max_text_chars, 4_000)
+    def _truncate_for_embedding(self, text: str) -> str:
+        if self.backend == "gemini_api":
+            max_chars = min(settings.gemini_api_embedding_max_text_chars, 8_000)
+        else:
+            max_chars = min(settings.vertex_embedding_max_text_chars, 4_000)
         if max_chars <= 0 or len(text) <= max_chars:
             return text
         return text[:max_chars]
 
-    def _vertex_request_batches(self, texts: list[str]) -> list[list[str]]:
+    def _build_request_batches(self, texts: list[str]) -> list[list[str]]:
         max_items = min(max(1, self.batch_size), 250)
-        max_chars = max(1, settings.vertex_embedding_max_request_chars)
+        if self.backend == "gemini_api":
+            max_chars = max(1, settings.gemini_api_embedding_max_request_chars)
+        else:
+            max_chars = max(1, settings.vertex_embedding_max_request_chars)
         batches: list[list[str]] = []
         current_batch: list[str] = []
         current_chars = 0
 
         for text in texts:
-            truncated = self._truncate_for_vertex(text)
+            truncated = self._truncate_for_embedding(text)
             text_chars = len(truncated)
             should_flush = (
                 current_batch
@@ -124,9 +136,9 @@ class CortexEmbedder:
 
         return batches
 
-    def _embed_vertex_sync_once(self, texts: list[str]) -> list[list[float]]:
+    def _embed_genai_sync_once(self, texts: list[str]) -> list[list[float]]:
         if self.client is None:
-            raise RuntimeError("Vertex embedding client is not initialized.")
+            raise RuntimeError("Embedding client is not initialized.")
         response = self.client.models.embed_content(
             model=self.model,
             contents=texts,
@@ -139,28 +151,32 @@ class CortexEmbedder:
         dense_vectors = [embedding.values for embedding in response.embeddings or []]
         if len(dense_vectors) != len(texts):
             raise ValueError(
-                f"Vertex returned {len(dense_vectors)} embeddings for {len(texts)} inputs."
+                f"Embedding API returned {len(dense_vectors)} embeddings for {len(texts)} inputs."
             )
         return self._validate_dimensions(dense_vectors)
 
-    def _wait_for_vertex_quota_slot(self) -> None:
-        global _last_vertex_embedding_request_at
+    def _wait_for_quota_slot(self) -> None:
+        global _last_embedding_request_at
 
-        interval = max(0.0, settings.vertex_embedding_min_request_interval_seconds)
+        if self.backend == "gemini_api":
+            interval = max(0.0, settings.gemini_api_embedding_min_request_interval_seconds)
+        else:
+            interval = max(0.0, settings.vertex_embedding_min_request_interval_seconds)
         if interval <= 0:
             return
 
         now = time.monotonic()
-        wait_seconds = interval - (now - _last_vertex_embedding_request_at)
+        wait_seconds = interval - (now - _last_embedding_request_at)
         if wait_seconds > 0:
             logger.info(
-                "Waiting %.1fs before next Vertex embedding request to respect quota.",
+                "Waiting %.1fs before next %s embedding request to respect quota.",
                 wait_seconds,
+                self.backend,
             )
             time.sleep(wait_seconds)
-        _last_vertex_embedding_request_at = time.monotonic()
+        _last_embedding_request_at = time.monotonic()
 
-    def _is_vertex_quota_error(self, exc: Exception) -> bool:
+    def _is_quota_error(self, exc: Exception) -> bool:
         text = str(exc).lower()
         return (
             "429" in text
@@ -169,15 +185,22 @@ class CortexEmbedder:
             or "online_prediction_requests_per_base_model" in text
         )
 
-    def _embed_vertex_sync(self, texts: list[str]) -> list[list[float]]:
+    def _embed_genai_sync(self, texts: list[str]) -> list[list[float]]:
         attempts = max(1, settings.vertex_embedding_retry_attempts)
 
-        def call_vertex(batch: list[str]) -> list[list[float]]:
+        if self.backend == "gemini_api":
+            quota_retry = settings.gemini_api_embedding_quota_retry_seconds
+            interval = settings.gemini_api_embedding_min_request_interval_seconds
+        else:
+            quota_retry = settings.vertex_embedding_quota_retry_seconds
+            interval = settings.vertex_embedding_min_request_interval_seconds
+
+        def call_embed(batch: list[str]) -> list[list[float]]:
             last_error: Exception | None = None
             for attempt in range(1, attempts + 1):
                 try:
-                    self._wait_for_vertex_quota_slot()
-                    return self._embed_vertex_sync_once(batch)
+                    self._wait_for_quota_slot()
+                    return self._embed_genai_sync_once(batch)
                 except ValueError:
                     raise
                 except Exception as exc:
@@ -185,16 +208,14 @@ class CortexEmbedder:
                     if attempt >= attempts:
                         break
 
-                    if self._is_vertex_quota_error(exc):
-                        wait_seconds = max(
-                            settings.vertex_embedding_quota_retry_seconds,
-                            settings.vertex_embedding_min_request_interval_seconds,
-                        )
+                    if self._is_quota_error(exc):
+                        wait_seconds = max(quota_retry, interval)
                     else:
                         wait_seconds = min(10.0, 2.0 ** (attempt - 1))
 
                     logger.warning(
-                        "Vertex embedding request failed on attempt %s/%s; retrying in %.1fs: %s",
+                        "%s embedding request failed on attempt %s/%s; retrying in %.1fs: %s",
+                        self.backend,
                         attempt,
                         attempts,
                         wait_seconds,
@@ -204,17 +225,18 @@ class CortexEmbedder:
 
             if last_error is not None:
                 raise last_error
-            raise RuntimeError("Vertex embedding request failed without an exception.")
+            raise RuntimeError("Embedding request failed without an exception.")
 
         dense_vectors: list[list[float]] = []
-        batches = self._vertex_request_batches(texts)
+        batches = self._build_request_batches(texts)
         logger.info(
-            "Split %s texts into %s Vertex embedding requests.",
+            "Split %s texts into %s %s embedding requests.",
             len(texts),
             len(batches),
+            self.backend,
         )
         for batch in batches:
-            dense_vectors.extend(call_vertex(batch))
+            dense_vectors.extend(call_embed(batch))
         return dense_vectors
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
@@ -227,14 +249,14 @@ class CortexEmbedder:
         if not texts:
             return []
 
-        if self.backend == "vertex":
+        if self.backend in {"vertex", "gemini_api"}:
             logger.info(
-                "Embedding %s texts with Vertex model '%s' in %s.",
+                "Embedding %s texts with %s model '%s'.",
                 len(texts),
+                self.backend,
                 self.model,
-                settings.vertex_location,
             )
-            return await asyncio.to_thread(self._embed_vertex_sync, texts)
+            return await asyncio.to_thread(self._embed_genai_sync, texts)
 
         logger.info(
             "Embedding %s texts locally with FastEmbed model '%s' on %s.",
