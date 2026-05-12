@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     vertex_location: str = "us-central1"
     vertex_embedding_model: str = "text-embedding-005"
     vertex_embedding_task_type: str = "RETRIEVAL_DOCUMENT"
-    vertex_embedding_max_text_chars: int = 20_000
+    vertex_embedding_max_text_chars: int = 8_000
     vertex_embedding_retry_attempts: int = 3
     llm_backend: str = "gemini_api"
     vertex_llm_model: str = "gemini-2.5-flash"

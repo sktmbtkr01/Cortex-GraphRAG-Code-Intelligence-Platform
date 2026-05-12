@@ -84,7 +84,10 @@ class CortexEmbedder:
         return self._validate_dimensions(dense_vectors)
 
     def _truncate_for_vertex(self, text: str) -> str:
-        max_chars = settings.vertex_embedding_max_text_chars
+        # Vertex embedding limits are token-based, and dense code can tokenize
+        # much heavier than prose. Keep a conservative hard cap even if an env
+        # var is accidentally left at the model's nominal token limit.
+        max_chars = min(settings.vertex_embedding_max_text_chars, 8_000)
         if max_chars <= 0 or len(text) <= max_chars:
             return text
         return text[:max_chars]

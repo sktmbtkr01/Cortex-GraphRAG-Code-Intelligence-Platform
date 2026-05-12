@@ -577,6 +577,7 @@ What changed:
 - Sparse vector generation remains local.
 - Vertex requests are batched and retried with exponential backoff.
 - Returned vector dimensions are validated before Qdrant upsert/search.
+- Vertex embedding input text is conservatively capped at 8,000 characters per chunk because the model limit is token-based and code can tokenize much denser than prose.
 
 Required production env:
 
@@ -586,6 +587,7 @@ VERTEX_PROJECT_ID=<google-cloud-project-id>
 VERTEX_LOCATION=us-central1
 VERTEX_EMBEDDING_MODEL=text-embedding-005
 EMBEDDING_DIMENSIONS=768
+VERTEX_EMBEDDING_MAX_TEXT_CHARS=8000
 ```
 
 ---
