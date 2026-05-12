@@ -105,7 +105,7 @@ function upsertIngestEvent(
   return [...events.filter((item) => item.stage !== next.stage), next];
 }
 
-function formatApiError(error: unknown, fallback = "Request failed.") {
+function formatApiError(error: unknown, fallback = "Request failed."): string {
   if (!error) return fallback;
   if (typeof error === "string") return error;
   if (typeof error === "number" || typeof error === "boolean") return String(error);
