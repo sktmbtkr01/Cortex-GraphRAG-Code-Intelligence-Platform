@@ -139,14 +139,16 @@ class CortexEmbedder:
     def _embed_genai_sync_once(self, texts: list[str]) -> list[list[float]]:
         if self.client is None:
             raise RuntimeError("Embedding client is not initialized.")
+        config_kwargs = {
+            "task_type": settings.vertex_embedding_task_type,
+            "output_dimensionality": self.dimensions,
+        }
+        if self.backend == "vertex":
+            config_kwargs["auto_truncate"] = True
         response = self.client.models.embed_content(
             model=self.model,
             contents=texts,
-            config=types.EmbedContentConfig(
-                task_type=settings.vertex_embedding_task_type,
-                output_dimensionality=self.dimensions,
-                auto_truncate=True,
-            ),
+            config=types.EmbedContentConfig(**config_kwargs),
         )
         dense_vectors = [embedding.values for embedding in response.embeddings or []]
         if len(dense_vectors) != len(texts):
