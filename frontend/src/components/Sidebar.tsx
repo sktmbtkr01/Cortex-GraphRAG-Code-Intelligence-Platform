@@ -30,7 +30,7 @@ export default function Sidebar() {
             background: pathname === "/" ? "var(--panel)" : "transparent"
           }}
         >
-          <MessageSquare size={16} /> Chat
+          <MessageSquare size={16} /> Intel
         </Link>
         <Link 
           href="/repos" 
@@ -40,7 +40,7 @@ export default function Sidebar() {
             background: pathname === "/repos" ? "var(--panel)" : "transparent"
           }}
         >
-          <Database size={16} /> Repos
+          <Database size={16} /> The Dock
         </Link>
         <Link 
           href="/graph" 

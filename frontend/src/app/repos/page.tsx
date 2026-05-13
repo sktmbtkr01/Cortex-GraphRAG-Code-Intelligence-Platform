@@ -127,6 +127,59 @@ function formatApiError(error: unknown, fallback = "Request failed."): string {
   return fallback;
 }
 
+function getLimitNotice(error: unknown): { title: string; message: string } | null {
+  const detail = typeof error === "object" && error !== null && "detail" in error
+    ? (error as Record<string, unknown>).detail
+    : error;
+  if (!detail || typeof detail !== "object" || Array.isArray(detail)) return null;
+
+  const record = detail as Record<string, unknown>;
+  const code = String(record.code || "");
+  if (!code.includes("limit") && !["repo_too_large", "too_many_files", "too_many_chunks", "active_ingest_exists"].includes(code)) {
+    return null;
+  }
+
+  const limit = record.limit;
+  const unit = record.unit ? String(record.unit) : "";
+  const suffix = limit !== undefined && limit !== null ? ` Limit: ${limit}${unit ? ` ${unit}` : ""}.` : "";
+  return {
+    title: "Demo Limit Reached",
+    message: `${String(record.message || "This action is currently limited for the demo.")}${suffix}`,
+  };
+}
+
+function getLimitNoticeFromEvent(event: IngestStreamEvent): { title: string; message: string } | null {
+  if (event.type !== "error" && event.state !== "error") return null;
+  const message = event.message || "";
+  const patterns = [
+    { token: "too_many_files", title: "File Limit Reached" },
+    { token: "too_many_chunks", title: "Chunk Limit Reached" },
+    { token: "repo_too_large", title: "Repository Too Large" },
+    { token: "daily_ingest_limit", title: "Daily Ingest Limit Reached" },
+    { token: "daily_query_limit", title: "Daily Query Limit Reached" },
+    { token: "health_check_limit", title: "Health Check Limit Reached" },
+    { token: "global_active_ingest_limit", title: "Ingest Queue Full" },
+    { token: "active_ingest_exists", title: "Ingest Already Running" },
+  ];
+  const match = patterns.find((item) => message.includes(item.token));
+  if (!match) return null;
+
+  const friendly = message
+    .replace(/^HTTPException:\s*/, "")
+    .replace(/^HTTPException\([^)]*\):\s*/, "")
+    .replace(/['"{}]/g, "")
+    .replace(/\bcode:\s*[\w_]+,?\s*/g, "")
+    .replace(/\blimit:\s*/g, "Limit: ")
+    .replace(/\bunit:\s*/g, "")
+    .replace(/\bmessage:\s*/g, "")
+    .trim();
+
+  return {
+    title: match.title,
+    message: friendly || "This repository exceeds one of the configured demo limits.",
+  };
+}
+
 export default function ReposPage() {
   const API_URL = getApiUrl();
   const { authHeaders } = useAuth();
@@ -148,6 +201,7 @@ export default function ReposPage() {
   const [drawerLoading, setDrawerLoading] = useState(false);
   const [toastEvents, setToastEvents] = useState<Array<{ id: string; stage: string; message: string; state: "running" | "done" | "error" }>>([]);
   const [deleteTarget, setDeleteTarget] = useState<{ repo: string; branch: string } | null>(null);
+  const [limitNotice, setLimitNotice] = useState<{ title: string; message: string } | null>(null);
 
   const ingestStreamRef = useRef<EventSource | null>(null);
   const ingestPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -323,6 +377,10 @@ export default function ReposPage() {
   };
 
   const handleIngestEvent = (event: IngestStreamEvent, repoFallback: string) => {
+    const eventLimitNotice = getLimitNoticeFromEvent(event);
+    if (eventLimitNotice) {
+      setLimitNotice(eventLimitNotice);
+    }
     pushToast(event);
     if (event.state === "queued" || event.state === "running") {
       setIngestStatus(event.message);
@@ -354,7 +412,7 @@ export default function ReposPage() {
     if (event.type === "error") {
       setLoading(false);
       ingestActiveRef.current = false;
-      setIngestStatus(`Ingest failed: ${event.message}`);
+      setIngestStatus(eventLimitNotice ? "Ingest stopped by a configured demo limit." : `Ingest failed: ${event.message}`);
       closeStream();
       closePoll();
       setTimeout(() => setToastEvents([]), 6500);
@@ -424,9 +482,15 @@ export default function ReposPage() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
+        const notice = getLimitNotice(data);
+        if (notice) {
+          setLimitNotice(notice);
+        }
         const message = formatApiError(data, `Failed to start ingest (${res.status}).`);
-        alert(`Error: ${message}`);
-        setIngestStatus(`Ingest failed: ${message}`);
+        if (!notice) {
+          alert(`Error: ${message}`);
+        }
+        setIngestStatus(notice ? "Ingest stopped by a configured demo limit." : `Ingest failed: ${message}`);
         setLoading(false);
         ingestActiveRef.current = false;
         return;
@@ -543,9 +607,15 @@ export default function ReposPage() {
       });
       const data = await res.json();
       if (!res.ok) {
-        const message = data.detail || "Failed to check for repository updates.";
+        const notice = getLimitNotice(data);
+        if (notice) {
+          setLimitNotice(notice);
+        }
+        const message = formatApiError(data, "Failed to check for repository updates.");
         setIngestStatus(message);
-        pushIngestConsoleEvent("update failed", message, "error");
+        if (!notice) {
+          pushIngestConsoleEvent("update failed", message, "error");
+        }
         setLoading(false);
         ingestActiveRef.current = false;
         return;
@@ -762,6 +832,15 @@ export default function ReposPage() {
         tone="danger"
         onCancel={() => setDeleteTarget(null)}
         onConfirm={() => void confirmDelete()}
+      />
+      <ConfirmDialog
+        open={Boolean(limitNotice)}
+        title={limitNotice?.title || "Demo Limit Reached"}
+        message={limitNotice?.message || ""}
+        confirmLabel="Got it"
+        cancelLabel="Close"
+        onCancel={() => setLimitNotice(null)}
+        onConfirm={() => setLimitNotice(null)}
       />
     </section>
   );

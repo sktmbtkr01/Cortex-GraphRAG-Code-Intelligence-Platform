@@ -585,18 +585,44 @@ select {
   min-width: min(420px, 100%);
   border: 1px solid rgba(255, 255, 255, 0.1);
   background: rgba(9, 13, 11, 0.72);
-  padding: 8px 14px;
+  padding: 8px 10px 8px 14px;
   border-radius: 22px;
   backdrop-filter: blur(18px);
 }
 
-.query-scope select {
+.query-scope > svg {
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
+.query-scope .searchable-select {
   flex: 1;
   min-width: 0;
+}
+
+.query-scope .searchable-select-label {
+  display: none;
+}
+
+.query-scope .searchable-select-trigger {
   border: 0;
   background: transparent;
-  min-height: 32px;
-  padding: 0;
+  min-height: 34px;
+  padding: 0 4px 0 0;
+  box-shadow: none;
+}
+
+.query-scope .searchable-select-trigger:hover,
+.query-scope .searchable-select-trigger[aria-expanded="true"] {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.query-scope .searchable-select-popover {
+  left: auto;
+  right: 0;
+  min-width: min(420px, calc(100vw - 40px));
 }
 
 .query-shell {

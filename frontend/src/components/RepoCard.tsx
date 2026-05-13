@@ -34,7 +34,7 @@ export default function RepoCard({
   const status = (ingestionStatus || "ready").toLowerCase();
   const statusStyles =
     status === "processing" || status === "updating"
-      ? { label: status === "updating" ? "Updating" : "Processing", color: "#f3b35f", border: "rgba(243,179,95,0.35)", bg: "rgba(243,179,95,0.12)" }
+      ? { label: status === "updating" ? "Updating" : "Interrupted", color: "#ff6b6b", border: "rgba(255,107,107,0.35)", bg: "rgba(255,107,107,0.12)" }
       : status === "failed" || status === "update_failed"
         ? { label: "Failed", color: "#ff6b6b", border: "rgba(255,107,107,0.35)", bg: "rgba(255,107,107,0.12)" }
         : { label: "Ready", color: "var(--accent)", border: "rgba(141,222,122,0.35)", bg: "rgba(141,222,122,0.12)" };

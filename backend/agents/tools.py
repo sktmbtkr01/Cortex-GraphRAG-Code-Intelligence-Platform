@@ -4,6 +4,7 @@ Provides LangGraph tools for vector search, graph search, and utility capabiliti
 """
 
 import ast
+import contextvars
 import operator
 from typing import Literal
 
@@ -14,23 +15,27 @@ from core.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Thread-local context for the current user (set before agent invocation)
-_current_user_id: str | None = None
-_current_branch: str | None = None
+_current_user_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "cortex_agent_user_id",
+    default=None,
+)
+_current_branch: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "cortex_agent_branch",
+    default=None,
+)
 
 def set_agent_user_context(user_id: str | None, branch: str | None = None):
     """Set the user_id context for agent tool calls. Called before each agent run."""
-    global _current_user_id, _current_branch
-    _current_user_id = user_id
-    _current_branch = branch
+    _current_user_id.set(user_id)
+    _current_branch.set(branch)
 
 def get_agent_user_context() -> str | None:
     """Get the current user_id context."""
-    return _current_user_id
+    return _current_user_id.get()
 
 def get_agent_branch_context() -> str | None:
     """Get the current branch context for branch-scoped tool calls."""
-    return _current_branch
+    return _current_branch.get()
 
 # Lazy loaded singletons
 _embedder = None

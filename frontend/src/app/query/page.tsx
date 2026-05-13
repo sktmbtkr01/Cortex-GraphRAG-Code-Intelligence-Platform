@@ -7,6 +7,7 @@ import MarkdownMessage from "@/components/MarkdownMessage";
 import { useAuth } from "@/context/AuthContext";
 import { ShiningText } from "@/components/ui/shining-text";
 import { getApiUrl } from "@/app/utils/api-url";
+import SearchableSelect from "@/components/ui/searchable-select";
 
 type SourceChunk = {
   text: string;
@@ -138,6 +139,14 @@ export default function QueryPage() {
   }, [messages, loading]);
 
   const selectedRepo = allRepos.find((item) => `${item.repo}@${item.branch}` === repoKey);
+  const repoOptions = React.useMemo(() => [
+    { value: "all", label: "All repositories" },
+    ...allRepos.map((repo) => ({
+      value: `${repo.repo}@${repo.branch}`,
+      label: repo.repo,
+      meta: `${repo.branch}${repo.commit_sha ? ` · ${shortSha(repo.commit_sha)}` : ""}`,
+    })),
+  ], [allRepos]);
 
   const sendQuery = async (userMessage: string, repoOverride?: string) => {
     if (!userMessage.trim() || loading) return;
@@ -241,14 +250,14 @@ export default function QueryPage() {
         </div>
         <div className="query-scope">
           <GitBranch size={16} />
-          <select value={repoKey} onChange={e => setRepoKey(e.target.value)} aria-label="Repository filter">
-            <option value="all">All repositories</option>
-            {allRepos.map(r => (
-              <option key={`${r.repo}@${r.branch}`} value={`${r.repo}@${r.branch}`}>
-                {r.repo} @ {r.branch}
-              </option>
-            ))}
-          </select>
+          <SearchableSelect
+            label="Repository"
+            value={repoKey || "all"}
+            options={repoOptions}
+            placeholder="Select repository"
+            emptyText="No indexed repositories found."
+            onChange={setRepoKey}
+          />
         </div>
       </header>
 
@@ -305,7 +314,6 @@ export default function QueryPage() {
                           <span>{source.language || source.source_type}</span>
                           {source.function_name && <span>{source.function_name}</span>}
                           {source.class_name && <span>{source.class_name}</span>}
-                          {source.score != null && <span>{source.score.toFixed(2)}</span>}
                         </div>
                       </button>
                     ))}

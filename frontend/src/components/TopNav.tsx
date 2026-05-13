@@ -8,8 +8,8 @@ import ConfirmDialog from "@/components/ConfirmDialog";
 import { useState } from "react";
 
 const NAV_ITEMS = [
-  { href: "/repos", label: "Repo Manager", icon: Database },
-  { href: "/query", label: "Query", icon: MessageSquare },
+  { href: "/repos", label: "The Dock", icon: Database },
+  { href: "/query", label: "Intel", icon: MessageSquare },
   { href: "/graph", label: "Knowledge Graph", icon: Share2 },
 ];
 
