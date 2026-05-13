@@ -1,4 +1,4 @@
-# Cortex
+<h1 align="center">Cortex</h1>
 
 <p align="center">
   <strong>A multi-tenant GraphRAG code intelligence platform that transforms GitHub repositories into queryable knowledge bases.</strong>
@@ -47,7 +47,7 @@ flowchart LR
 
     subgraph Google Cloud
         CR["Cloud Run<br/>FastAPI Backend"]
-        VA["Vertex AI<br/>Gemini 2.5 Flash"]
+        VA["Gemini 2.5 Flash<br/>LLM Generation"]
         VE["Vertex AI Embeddings<br/>text-embedding-005"]
         SM["Secret Manager"]
         CB["Cloud Build<br/>CI/CD"]
@@ -58,18 +58,16 @@ flowchart LR
         GH["GitHub<br/>OAuth + Repos"]
         QD["Qdrant Cloud<br/>Vector Store"]
         N4["Neo4j AuraDB<br/>Knowledge Graph"]
-        GQ["Groq<br/>Llama 3.3 70B"]
     end
 
     UI -->|HTTPS| CR
-    CR --> VA
+    CR -->|LLM Generation| VA
     CR --> VE
     CR --> SM
     CR --> RD
     CR -->|OAuth + API| GH
     CR -->|Hybrid Search| QD
     CR -->|Cypher| N4
-    CR -->|Agent LLM| GQ
     CB -->|Deploy| CR
 ```
 
@@ -98,7 +96,7 @@ flowchart LR
 
 - **Hybrid vector search** — Dense embeddings (Vertex AI `text-embedding-005`, 768 dimensions) + sparse BM25-style lexical vectors in Qdrant.
 - **Graph retrieval** — Neo4j stores structural relationships: repositories, files, functions, classes, imports, call graphs, dependencies, PRs, and commits.
-- **LangGraph supervisor** — Multi-step agent with Groq Llama-3.3-70B (primary) and Gemini 2.5 Flash (fallback). Includes a critic node for hallucination self-checks and a circuit breaker at loop count ≥ 3.
+- **LangGraph supervisor** — Multi-step agent backed by Gemini 2.5 Flash. Includes a critic node for hallucination self-checks and a circuit breaker at loop count ≥ 3.
 - **7 agent tools** — `search_code`, `search_issues`, `get_file_content`, `get_call_graph`, `get_file_history`, `get_dependencies`, `calculate_math`, plus `ask_human_for_clarification`.
 - **Retrieval trace** — Every response labels its retrieval mode (`semantic`, `graph`, `hybrid`, or `semantic_fallback`) and shows which tools were invoked.
 
@@ -128,7 +126,7 @@ flowchart LR
 | **3D Visualization** | react-force-graph-3d, Three.js |
 | **Code Highlighting** | Shiki |
 | **Backend** | FastAPI, Pydantic, Python 3.11 |
-| **Agent** | LangGraph, Groq Llama-3.3-70B (primary), Gemini 2.5 Flash (fallback) |
+| **Agent** | LangGraph, Gemini 2.5 Flash |
 | **Embeddings** | Vertex AI `text-embedding-005` (production), FastEmbed `BAAI/bge-base-en-v1.5` (local dev) |
 | **Vector Store** | Qdrant Cloud — 768-dim dense + sparse BM25 hybrid search |
 | **Knowledge Graph** | Neo4j AuraDB |
@@ -236,8 +234,7 @@ Continuous deployment is configured via `cloudbuild.yaml`. Every push to `main`:
 | `QDRANT_API_KEY` | Qdrant API key |
 | `NEO4J_URI` | Neo4j AuraDB connection URI |
 | `NEO4J_PASSWORD` | Neo4j password |
-| `GROQ_API_KEY` | Groq API key (agent primary LLM) |
-| `GEMINI_API_KEY` | Gemini API key (agent fallback LLM) |
+| `GEMINI_API_KEY` | Gemini API key |
 | `GITHUB_OAUTH_CLIENT_ID` | GitHub OAuth app client ID |
 | `GITHUB_OAUTH_CLIENT_SECRET` | GitHub OAuth app client secret |
 
@@ -245,14 +242,14 @@ Continuous deployment is configured via `cloudbuild.yaml`. Every push to `main`:
 
 | Limit | Default |
 |---|---|
-| Max repos per user | 2 |
-| Max repo size | 500 MB |
+| Max repos per user | 3 |
+| Max repo size | 200 MB |
 | Max eligible files per repo | 500 |
-| Max chunks per repo | 3,000 |
+| Max chunks per repo | 2,200 |
 | Max concurrent ingests per user | 1 |
-| Max global concurrent ingests | 2 |
+| Max global concurrent ingests | 4 |
 | Max ingests per user per day | 30 |
-| Max queries per user per day | 30 |
+| Max queries per user per day | 50 |
 | Session TTL | 24 hours |
 
 ---
@@ -266,7 +263,7 @@ Continuous deployment is configured via `cloudbuild.yaml`. Every push to `main`:
 - Qdrant Cloud account (or local Qdrant instance)
 - Neo4j AuraDB account (or local Neo4j instance)
 - GitHub OAuth application
-- Gemini API key or Groq API key
+- Gemini API key
 
 ### Environment Setup
 
@@ -287,7 +284,6 @@ NEO4J_PASSWORD=
 
 # LLM
 GEMINI_API_KEY=
-GROQ_API_KEY=
 
 # Embeddings (local)
 EMBEDDING_BACKEND=fastembed
