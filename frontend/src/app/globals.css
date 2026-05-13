@@ -272,14 +272,24 @@ select {
   position: absolute;
   top: 14px;
   right: 14px;
-  width: 30px;
-  height: 30px;
-  display: grid;
-  place-items: center;
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
   border: 1px solid var(--line);
   border-radius: 50%;
+  line-height: 1;
   color: var(--muted);
   background: transparent;
+}
+
+.confirm-dialog-close svg {
+  display: block;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
 }
 
 .confirm-dialog-actions {
@@ -551,6 +561,8 @@ select {
 }
 
 .query-header {
+  position: relative;
+  z-index: 30;
   display: grid;
   grid-template-columns: minmax(220px, 1fr) auto minmax(220px, 1fr);
   align-items: center;
@@ -577,6 +589,8 @@ select {
 }
 
 .query-scope {
+  position: relative;
+  z-index: 40;
   grid-column: 3;
   justify-self: end;
   display: flex;
@@ -620,12 +634,15 @@ select {
 }
 
 .query-scope .searchable-select-popover {
+  z-index: 120;
   left: auto;
   right: 0;
   min-width: min(420px, calc(100vw - 40px));
 }
 
 .query-shell {
+  position: relative;
+  z-index: 1;
   min-height: 0;
   height: 100%;
   display: grid;

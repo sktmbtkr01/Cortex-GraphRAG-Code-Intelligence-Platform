@@ -767,6 +767,40 @@ async def agent_query(
             ]
             return result
 
+        if route == "graph":
+            rag = RAGPipeline()
+            result = await rag.query(
+                user_query=request.query,
+                repo=request.repo,
+                branch=request.branch,
+                language=request.language,
+                top_k=request.top_k,
+                history=request.history,
+                user_id=user.user_id,
+            )
+            result.retrieval_mode = "hybrid"
+            result.fallback_used = True
+            result.trace = [
+                RetrievalTraceStep(
+                    step=1,
+                    kind="graph",
+                    tool="graph_router",
+                    input={"query": request.query, "repo": request.repo, "branch": request.branch},
+                    summary="Graph-style question did not include a specific symbol, so Cortex used hybrid retrieval.",
+                ),
+                *[
+                    RetrievalTraceStep(
+                        step=item.step + 1,
+                        kind=item.kind,
+                        tool=item.tool,
+                        input=item.input,
+                        summary=item.summary,
+                    )
+                    for item in result.trace
+                ],
+            ]
+            return result
+
         if route == "semantic":
             rag = RAGPipeline()
             result = await rag.query(
