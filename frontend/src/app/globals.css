@@ -1069,58 +1069,6 @@ select {
   letter-spacing: 0.015em;
 }
 
-.animated-letter-text {
-  display: inline-flex;
-  align-items: center;
-  color: var(--foreground);
-  font: inherit;
-  letter-spacing: inherit;
-}
-
-.animated-letter-mark {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  margin-inline: -0.02em;
-  transform: translateY(0.045em);
-}
-
-.animated-letter-defs {
-  position: absolute;
-  width: 0;
-  height: 0;
-}
-
-.animated-letter-outer {
-  width: 0.75em;
-  height: 0.75em;
-}
-
-.animated-letter-diamond-wrap {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.animated-letter-diamond {
-  width: 0.32em;
-  height: 0.32em;
-  animation: diamond-rotate 5.5s linear infinite;
-  transform-origin: 50% 50%;
-}
-
-@keyframes diamond-rotate {
-  0% {
-    transform: rotate(0deg);
-  }
-  100% {
-    transform: rotate(360deg);
-  }
-}
-
 .repos-workspace .global-brain-row {
   margin: 0;
 }

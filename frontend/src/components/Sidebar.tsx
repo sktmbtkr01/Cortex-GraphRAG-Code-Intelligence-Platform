@@ -40,7 +40,7 @@ export default function Sidebar() {
             background: pathname === "/repos" ? "var(--panel)" : "transparent"
           }}
         >
-          <Database size={16} /> The Dock
+          <Database size={16} /> Repo Manager
         </Link>
         <Link 
           href="/graph" 

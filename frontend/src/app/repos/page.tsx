@@ -9,7 +9,6 @@ import RepoCard from "@/components/RepoCard";
 import Drawer from "@/components/Drawer";
 import GlobalBrainBar from "@/components/GlobalBrainBar";
 import SearchableSelect from "@/components/ui/searchable-select";
-import { AnimatedLetterText } from "@/components/ui/potfolio-text";
 import { openIngestEventStream, type IngestStreamEvent } from "@/app/utils/sse";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import { getApiUrl } from "@/app/utils/api-url";
@@ -691,9 +690,7 @@ export default function ReposPage() {
   return (
     <section className="workspace repos-workspace">
       <header className="page-header repo-page-header">
-        <h1>
-          <AnimatedLetterText text="The Dock" letterToReplace="o" />
-        </h1>
+        <h1>Repository Manager</h1>
       </header>
 
       <GlobalBrainBar />
