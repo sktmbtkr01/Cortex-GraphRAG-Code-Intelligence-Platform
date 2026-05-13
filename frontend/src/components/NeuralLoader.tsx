@@ -1,6 +1,6 @@
 "use client";
 
-import Loader from "@/components/ui/loader-4";
+import Loader from "@/components/ui/loader-15";
 
 type NeuralLoaderProps = {
   status?: string;
