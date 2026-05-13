@@ -428,13 +428,12 @@ async def ingest_job_status(
 async def list_repos(
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> list[RepoStatus]:
-    """List repositories accessible to this user (owned + public)."""
+    """List repositories indexed by this Cortex user."""
     try:
         neo4j = Neo4jManager()
-        # Return repos owned by this user OR marked as public
         records = neo4j.run_query(
             "MATCH (r:Repository) "
-            "WHERE (r.user_id = $user_id OR r.is_public = true) "
+            "WHERE r.user_id = $user_id "
             "RETURN r.full_name AS repo, coalesce(r.branch, r.default_branch, 'main') AS branch, "
             "r.commit_sha AS commit_sha, r.is_private AS is_private, "
             "coalesce(r.ingestion_status, 'ready') AS ingestion_status, "
@@ -860,9 +859,8 @@ async def graph_stats(
     """Graph statistics scoped to user's repos."""
     try:
         neo4j = Neo4jManager()
-        # Only count nodes belonging to this user or public repos
         node_records = neo4j.run_query(
-            "MATCH (n) WHERE n.user_id = $user_id OR n.is_public = true "
+            "MATCH (n) WHERE n.user_id = $user_id "
             "RETURN labels(n)[0] AS label, count(n) AS count",
             {"user_id": user.user_id},
         )
@@ -870,8 +868,8 @@ async def graph_stats(
 
         rel_records = neo4j.run_query(
             "MATCH (a)-[r]->(b) "
-            "WHERE (a.user_id = $user_id OR a.is_public = true) "
-            "AND (b.user_id = $user_id OR b.is_public = true) "
+            "WHERE a.user_id = $user_id "
+            "AND b.user_id = $user_id "
             "RETURN type(r) AS type, count(r) AS count",
             {"user_id": user.user_id},
         )
@@ -892,7 +890,7 @@ async def global_stats(
 
         repo_row = neo4j.run_query(
             "MATCH (r:Repository) "
-            "WHERE r.user_id = $user_id OR r.is_public = true "
+            "WHERE r.user_id = $user_id "
             "RETURN count(r) AS c",
             {"user_id": user.user_id},
         )
@@ -900,7 +898,7 @@ async def global_stats(
 
         node_row = neo4j.run_query(
             "MATCH (n) "
-            "WHERE n.user_id = $user_id OR n.is_public = true "
+            "WHERE n.user_id = $user_id "
             "RETURN count(n) AS c",
             {"user_id": user.user_id},
         )
@@ -908,8 +906,8 @@ async def global_stats(
 
         rel_row = neo4j.run_query(
             "MATCH (a)-[r]->(b) "
-            "WHERE (a.user_id = $user_id OR a.is_public = true) "
-            "AND (b.user_id = $user_id OR b.is_public = true) "
+            "WHERE a.user_id = $user_id "
+            "AND b.user_id = $user_id "
             "RETURN count(r) AS c",
             {"user_id": user.user_id},
         )
@@ -923,14 +921,10 @@ async def global_stats(
 
             client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
             qdrant_filter = qmodels.Filter(
-                should=[
+                must=[
                     qmodels.FieldCondition(
                         key="user_id",
                         match=qmodels.MatchValue(value=user.user_id),
-                    ),
-                    qmodels.FieldCondition(
-                        key="is_public",
-                        match=qmodels.MatchValue(value=True),
                     ),
                 ],
             )
@@ -973,7 +967,7 @@ async def graph_explore(
         # Verify user has access to this repo
         access_check = neo4j.run_query(
             "MATCH (r:Repository {full_name: $repo}) "
-            "WHERE (r.user_id = $user_id OR r.is_public = true) "
+            "WHERE r.user_id = $user_id "
             "AND ($branch IS NULL OR coalesce(r.branch, r.default_branch, 'main') = $branch) "
             "RETURN r.full_name AS name",
             {"repo": repo, "branch": branch, "user_id": user.user_id},
@@ -985,8 +979,8 @@ async def graph_explore(
         MATCH (n)-[r]->(m)
         WHERE (n.repo = $repo OR n.full_name = $repo)
           AND (m.repo = $repo OR m.full_name = $repo)
-          AND (n.user_id = $user_id OR n.is_public = true)
-          AND (m.user_id = $user_id OR m.is_public = true)
+          AND n.user_id = $user_id
+          AND m.user_id = $user_id
           AND ($branch IS NULL OR coalesce(n.branch, 'main') = $branch)
           AND ($branch IS NULL OR coalesce(m.branch, 'main') = $branch)
           AND (
@@ -1071,7 +1065,7 @@ async def get_repo_snapshot(
         # Verify access
         access_check = neo4j.run_query(
             "MATCH (r:Repository {full_name: $repo}) "
-            "WHERE (r.user_id = $user_id OR r.is_public = true) "
+            "WHERE r.user_id = $user_id "
             "AND ($branch IS NULL OR coalesce(r.branch, r.default_branch, 'main') = $branch) "
             "OPTIONAL MATCH (s:Snapshot {id: $snapshot_id}) "
             "RETURN coalesce(s.snapshot, r.snapshot) AS snapshot, "
@@ -1123,7 +1117,7 @@ async def regenerate_repo_snapshot(
         neo4j = Neo4jManager()
         rows = neo4j.run_query(
             "MATCH (r:Repository {full_name: $repo}) "
-            "WHERE (r.user_id = $user_id OR r.is_public = true) "
+            "WHERE r.user_id = $user_id "
             "AND coalesce(r.branch, r.default_branch, 'main') = $branch "
             "RETURN r.commit_sha AS commit_sha",
             {"repo": full_name, "branch": branch_name, "user_id": user.user_id},
@@ -1158,7 +1152,7 @@ async def _run_repo_health_check(
         neo4j = Neo4jManager()
         repo_rows = neo4j.run_query(
             "MATCH (r:Repository {full_name: $repo}) "
-            "WHERE (r.user_id = $user_id OR r.is_public = true) "
+            "WHERE r.user_id = $user_id "
             "AND coalesce(r.branch, r.default_branch, 'main') = $branch "
             "RETURN r.commit_sha AS commit_sha, r.ingestion_status AS status, "
             "r.last_ingest_at AS last_ingest_at",
@@ -1183,7 +1177,7 @@ async def _run_repo_health_check(
 
         node_rows = neo4j.run_query(
             "MATCH (n) WHERE (n.repo = $repo OR n.full_name = $repo) "
-            "AND (n.user_id = $user_id OR n.is_public = true) "
+            "AND n.user_id = $user_id "
             "AND coalesce(n.branch, 'main') = $branch "
             "RETURN labels(n)[0] AS label, count(n) AS count",
             {"repo": full_name, "branch": branch_name, "user_id": user.user_id},
@@ -1192,8 +1186,8 @@ async def _run_repo_health_check(
             "MATCH (a)-[r]->(b) "
             "WHERE (a.repo = $repo OR a.full_name = $repo) "
             "AND (b.repo = $repo OR b.full_name = $repo) "
-            "AND (a.user_id = $user_id OR a.is_public = true) "
-            "AND (b.user_id = $user_id OR b.is_public = true) "
+            "AND a.user_id = $user_id "
+            "AND b.user_id = $user_id "
             "AND coalesce(a.branch, 'main') = $branch "
             "AND coalesce(b.branch, 'main') = $branch "
             "RETURN type(r) AS type, count(r) AS count",
@@ -1325,7 +1319,7 @@ async def _run_repo_health_check(
         )
         neo4j.run_query(
             "MATCH (r:Repository {full_name: $repo}) "
-            "WHERE (r.user_id = $user_id OR r.is_public = true) "
+            "WHERE r.user_id = $user_id "
             "AND coalesce(r.branch, r.default_branch, 'main') = $branch "
             "REMOVE r.health_report, r.health_report_commit_sha, r.health_checked_at",
             {

@@ -249,7 +249,7 @@ def get_call_graph(function_name: str, repo: str | None = None) -> str:
         callee_query += " WHERE true "
     if branch:
         callee_query += " AND coalesce(caller.branch, 'main') = $branch AND coalesce(callee.branch, 'main') = $branch "
-    callee_query += " AND (caller.user_id = $user_id OR caller.is_public = true) AND (callee.user_id = $user_id OR callee.is_public = true) "
+    callee_query += " AND caller.user_id = $user_id AND callee.user_id = $user_id "
     callee_query += " RETURN callee.name AS callee_name, callee.repo AS repo LIMIT 20"
     
     callees = neo4j.run_query(callee_query, {"func_name": function_name, "repo": repo, "user_id": user_id, "branch": branch})
@@ -263,7 +263,7 @@ def get_call_graph(function_name: str, repo: str | None = None) -> str:
          caller_query += " WHERE true "
     if branch:
          caller_query += " AND coalesce(caller.branch, 'main') = $branch AND coalesce(callee.branch, 'main') = $branch "
-    caller_query += " AND (caller.user_id = $user_id OR caller.is_public = true) AND (callee.user_id = $user_id OR callee.is_public = true) "
+    caller_query += " AND caller.user_id = $user_id AND callee.user_id = $user_id "
     caller_query += " RETURN caller.name AS caller_name, caller.repo AS repo LIMIT 20"
     
     callers = neo4j.run_query(caller_query, {"func_name": function_name, "repo": repo, "user_id": user_id, "branch": branch})
@@ -305,12 +305,12 @@ def get_file_history(file_path: str, repo: str | None = None) -> str:
         query += " AND f.repo = $repo "
     if branch:
         query += " AND coalesce(f.branch, 'main') = $branch "
-    query += " AND (f.user_id = $user_id OR f.is_public = true) "
+    query += " AND f.user_id = $user_id "
         
     query += """
     OPTIONAL MATCH (pr:PullRequest)-[:MODIFIES]->(f)
     OPTIONAL MATCH (pr)-[:CLOSES]->(i:Issue)
-    WHERE (pr.user_id = $user_id OR pr.is_public = true OR pr IS NULL)
+    WHERE (pr.user_id = $user_id OR pr IS NULL)
     RETURN pr.number AS pr_num, pr.title AS pr_title, pr.state AS pr_state, i.number AS linked_issue
     ORDER BY pr.number DESC LIMIT 10
     """
@@ -350,7 +350,7 @@ def get_dependencies(module_name: str, repo: str | None = None) -> str:
          internal_query += " WHERE true "
     if branch:
          internal_query += " AND coalesce(file.branch, 'main') = $branch "
-    internal_query += " AND (file.user_id = $user_id OR file.is_public = true) AND (mod.user_id = $user_id OR mod.is_public = true) "
+    internal_query += " AND file.user_id = $user_id AND mod.user_id = $user_id "
     internal_query += " RETURN file.path AS file_path LIMIT 20"
     
     importers = neo4j.run_query(internal_query, {"module_name": module_name, "repo": repo, "user_id": user_id, "branch": branch})
@@ -364,7 +364,7 @@ def get_dependencies(module_name: str, repo: str | None = None) -> str:
          ext_query += " WHERE true "
     if branch:
          ext_query += " AND coalesce(r.branch, 'main') = $branch "
-    ext_query += " AND (r.user_id = $user_id OR r.is_public = true) AND (d.user_id = $user_id OR d.is_public = true) "
+    ext_query += " AND r.user_id = $user_id AND d.user_id = $user_id "
     ext_query += " RETURN d.version AS version LIMIT 1"
     
     deps = neo4j.run_query(ext_query, {"module_name": module_name, "repo": repo, "user_id": user_id, "branch": branch})

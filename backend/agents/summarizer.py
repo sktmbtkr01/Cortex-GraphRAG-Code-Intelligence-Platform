@@ -41,7 +41,7 @@ async def generate_repo_snapshot(repo: str, user_id: str | None = None, branch: 
     MATCH (f:File)-[r]-()
     WHERE f.repo = $repo
       AND coalesce(f.branch, 'main') = $branch
-      AND (f.user_id = $user_id OR f.is_public = true)
+      AND f.user_id = $user_id
     WITH f, count(r) AS degree
     ORDER BY degree DESC
     LIMIT 10
@@ -56,8 +56,8 @@ async def generate_repo_snapshot(repo: str, user_id: str | None = None, branch: 
     # ── 2. Entry points: files that are imported most ────────────────
     entry_query = """
     MATCH (importer:File)-[:IMPORTS]->(target:File)
-    WHERE (importer.user_id = $user_id OR importer.is_public = true)
-      AND (target.user_id = $user_id OR target.is_public = true)
+    WHERE importer.user_id = $user_id
+      AND target.user_id = $user_id
       AND coalesce(importer.branch, 'main') = $branch
       AND target.repo = $repo
       AND coalesce(target.branch, 'main') = $branch
@@ -77,7 +77,7 @@ async def generate_repo_snapshot(repo: str, user_id: str | None = None, branch: 
     MATCH (r:Repository)-[:DEPENDS_ON]->(d:Dependency)
     WHERE r.full_name = $repo
       AND coalesce(r.branch, r.default_branch, 'main') = $branch
-      AND (r.user_id = $user_id OR r.is_public = true)
+      AND r.user_id = $user_id
     RETURN d.name AS name, d.ecosystem AS ecosystem
     LIMIT 20
     """
@@ -90,7 +90,7 @@ async def generate_repo_snapshot(repo: str, user_id: str | None = None, branch: 
     # ── 4. Basic graph stats ─────────────────────────────────────────
     stats_query = """
     MATCH (n) WHERE (n.repo = $repo OR n.full_name = $repo)
-      AND (n.user_id = $user_id OR n.is_public = true)
+      AND n.user_id = $user_id
       AND coalesce(n.branch, 'main') = $branch
     RETURN labels(n)[0] AS label, count(n) AS count
     """

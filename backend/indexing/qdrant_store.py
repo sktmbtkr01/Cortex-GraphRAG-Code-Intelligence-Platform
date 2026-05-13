@@ -409,7 +409,8 @@ class VectorStore:
         Hybrid search using default RRF (Reciprocal Rank Fusion) built into Qdrant.
         
         Row-level tenant isolation: results are automatically filtered to chunks
-        owned by user_id OR marked as is_public=true.
+        owned by user_id. A public GitHub repository is still a private Cortex
+        index unless the product explicitly implements shared indexes later.
         """
         must_conditions = []
         if filters:
@@ -420,20 +421,12 @@ class VectorStore:
                     )
                 )
 
-        # Tenant isolation: user sees their own data + public data
+        # Tenant isolation: user sees only their own indexed chunks.
         if user_id:
             must_conditions.append(
-                qmodels.Filter(
-                    should=[
-                        qmodels.FieldCondition(
-                            key="user_id",
-                            match=qmodels.MatchValue(value=user_id)
-                        ),
-                        qmodels.FieldCondition(
-                            key="is_public",
-                            match=qmodels.MatchValue(value=True)
-                        ),
-                    ]
+                qmodels.FieldCondition(
+                    key="user_id",
+                    match=qmodels.MatchValue(value=user_id)
                 )
             )
 
@@ -505,17 +498,9 @@ class VectorStore:
         ]
         if user_id:
             must_conditions.append(
-                qmodels.Filter(
-                    should=[
-                        qmodels.FieldCondition(
-                            key="user_id",
-                            match=qmodels.MatchValue(value=user_id),
-                        ),
-                        qmodels.FieldCondition(
-                            key="is_public",
-                            match=qmodels.MatchValue(value=True),
-                        ),
-                    ]
+                qmodels.FieldCondition(
+                    key="user_id",
+                    match=qmodels.MatchValue(value=user_id),
                 )
             )
 
