@@ -2,12 +2,14 @@
 
 import type React from "react";
 
-import { cn } from "@/lib/utils";
-
 interface AnimatedLetterTextProps {
   text: string;
   letterToReplace?: string;
   className?: string;
+}
+
+function cn(...classes: Array<string | false | null | undefined>) {
+  return classes.filter(Boolean).join(" ");
 }
 
 export function AnimatedLetterText({ text = "Portfolio", letterToReplace = "o", className }: AnimatedLetterTextProps) {
