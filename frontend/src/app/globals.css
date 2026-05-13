@@ -1069,6 +1069,58 @@ select {
   letter-spacing: 0.015em;
 }
 
+.animated-letter-text {
+  display: inline-flex;
+  align-items: center;
+  color: var(--foreground);
+  font: inherit;
+  letter-spacing: inherit;
+}
+
+.animated-letter-mark {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-inline: -0.02em;
+  transform: translateY(0.045em);
+}
+
+.animated-letter-defs {
+  position: absolute;
+  width: 0;
+  height: 0;
+}
+
+.animated-letter-outer {
+  width: 0.75em;
+  height: 0.75em;
+}
+
+.animated-letter-diamond-wrap {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.animated-letter-diamond {
+  width: 0.32em;
+  height: 0.32em;
+  animation: diamond-rotate 5.5s linear infinite;
+  transform-origin: 50% 50%;
+}
+
+@keyframes diamond-rotate {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
 .repos-workspace .global-brain-row {
   margin: 0;
 }
@@ -1101,12 +1153,12 @@ select {
 }
 
 .repo-indexed-panel {
-  padding: 20px;
+  padding: 18px;
 }
 
 .repo-ingest-panel h2,
 .repo-indexed-panel h2 {
-  margin: 0;
+  margin: 0 0 8px;
   font-size: 1.08rem;
   font-weight: 680;
   letter-spacing: 0;
@@ -1426,13 +1478,13 @@ select {
 
 .repo-card-stack {
   display: grid;
-  gap: 14px;
+  gap: 12px;
 }
 
 .repo-card {
   display: grid;
-  gap: 14px;
-  padding: 16px;
+  gap: 12px;
+  padding: 14px 16px;
 }
 
 .repo-card-main {
